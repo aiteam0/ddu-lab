@@ -140,28 +140,6 @@ initial_state = ParseState(
 result = workflow.invoke(initial_state)
 ```
 
-### Configuration Files
-
-#### Magic PDF Configuration
-```json
-{
-    "models-dir": "/path/to/models",
-    "device-mode": "cpu",
-    "layout-config": {
-        "model": "doclayout_yolo"
-    },
-    "formula-config": {
-        "mfd_model": "yolo_v8_mfd",
-        "mfr_model": "unimernet_small",
-        "enable": true
-    },
-    "table-config": {
-        "model": "rapid_table",
-        "enable": true
-    }
-}
-```
-
 ## 🏗️ Architecture
 
 ### Module Structure
@@ -219,19 +197,6 @@ export DEEPL_API_KEY="your-deepl-key"
 # Model Configuration
 export MODELS_DIR="/path/to/models"
 export DEVICE_MODE="cpu"  # or "gpu"
-```
-
-### Magic PDF Configuration
-Copy `magic-pdf.template.json` to `magic-pdf.json` and configure:
-
-```json
-{
-    "models-dir": "/path/to/models",
-    "device-mode": "cpu",
-    "layout-config": {
-        "model": "doclayout_yolo"
-    }
-}
 ```
 
 ## 📊 Output Structure

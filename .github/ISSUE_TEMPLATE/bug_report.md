@@ -101,7 +101,6 @@ python test_complete_workflow.py --pdf "path/to/document.pdf"
 ```
 
 **Configuration files:**
-- [ ] Using default magic-pdf.json
 - [ ] Using custom configuration
 - [ ] No configuration file
 

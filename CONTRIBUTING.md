@@ -84,18 +84,7 @@ This project adheres to a code of conduct that we expect all participants to fol
    pip install -e .
    ```
 
-4. **Download Models**
-   ```bash
-   python 00-download_models_hf.py
-   ```
-
-5. **Setup Configuration**
-   ```bash
-   cp magic-pdf.template.json magic-pdf.json
-   # Edit magic-pdf.json with your settings
-   ```
-
-6. **Run Tests**
+4. **Run Tests**
    ```bash
    python test_complete_workflow.py
    ```

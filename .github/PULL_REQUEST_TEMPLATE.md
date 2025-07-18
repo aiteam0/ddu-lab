@@ -150,7 +150,6 @@ new_function(param1, param2, new_param)
 ```
 
 **Modified configuration:**
-- [ ] magic-pdf.json updated
 - [ ] New environment variables
 - [ ] Updated dependencies
 - [ ] Other: _________
