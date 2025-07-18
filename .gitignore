@@ -1,0 +1,34 @@
+#virtual environment
+.venv/
+
+#claude
+.claude/
+CLAUDE.md
+
+#data
+data/
+
+#models
+models/
+
+#env settings
+magic-pdf.json
+magic-pdf.template.json
+.env
+
+#pycache
+__pycache__/
+
+#logs
+logs/
+
+#export
+export/
+intermediate/
+docling_output/
+docyolo_output/
+
+#external libraries
+langchain_utils/
+magic_pdf/
+
