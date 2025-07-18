@@ -1,4 +1,4 @@
-# Contributing to H-DDU (Hierarchical Document Data Understanding)
+# Contributing to H-DDU (Hybrid-Deep Document Understanding)
 
 First off, thank you for considering contributing to H-DDU! 🎉 Your contributions help make document processing more accessible and powerful for everyone.
 

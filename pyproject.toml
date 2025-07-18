@@ -1,7 +1,7 @@
 [project]
 name = "h-ddu"
 version = "0.1.0"
-description = "Add your description here"
+description = "Hybrid-Deep Document Understanding: A comprehensive document processing and analysis system leveraging AI/ML for intelligent content extraction"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

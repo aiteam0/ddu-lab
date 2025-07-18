@@ -1,11 +1,11 @@
-# H-DDU (Hierarchical Document Data Understanding)
+# H-DDU (Hybrid-Deep Document Understanding)
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/aiteam0/ddu-lab/actions)
 [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A comprehensive document processing and analysis system that leverages advanced AI/ML techniques for hierarchical document understanding, parsing, and intelligent content extraction.
+A comprehensive document processing and analysis system that leverages advanced AI/ML techniques for hybrid-deep document understanding, parsing, and intelligent content extraction.
 
 ## 🚀 Features
 
@@ -343,4 +343,4 @@ This project is licensed under the **AGPL-3.0 License** - see the [LICENSE](LICE
 
 ---
 
-**H-DDU** - Transforming document processing with AI-powered hierarchical understanding.
+**H-DDU** - Transforming document processing with AI-powered hybrid-deep understanding.
