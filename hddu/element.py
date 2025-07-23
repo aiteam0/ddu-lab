@@ -5,7 +5,7 @@ from copy import deepcopy
 
 @dataclass
 class Element:
-    category: str  # table, figure, chart, heading1, header, footer, caption, paragraph, equation, list, index, footnote
+    category: str  # heading1, heading2, heading3, paragraph, list, table, figure, chart, equation, caption, footnote, header, footer, reference
     content: str = ""
     html: str = ""
     markdown: str = ""

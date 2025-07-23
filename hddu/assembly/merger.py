@@ -17,19 +17,16 @@ from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 logger.info("[ASSEMBLY_INIT] merger.py logger initialized - testing logging system")
-    
+
 class MergedElement(BaseModel):
     category: str = Field(description="The category of the element (e.g., 'paragraph', 'heading1').")
     text: str = Field(description="The merged and corrected text content.")
     is_valid: bool = Field(description="Whether this element is valid and should be included.", default=True)
 
-
-
 class MergedContent(BaseModel):
     text: str = Field(description="The most accurate plain text representation or caption for the figure.")
     markdown: str = Field(description="A clean, well-formatted Markdown representation for the figure (e.g., ![caption](path)).")
     html: str = Field(description="A clean, well-formatted HTML representation for the figure (e.g., <figure><img>...</figure>).")
-
 
 class LLMMerger:
     def __init__(self, text_llm: BaseChatModel, vision_llm: BaseChatModel):
@@ -79,10 +76,10 @@ OUTPUT LANGUAGE REQUIREMENT: Korean"""
             enhanced_human_prompt = f"""Analyze and merge these two elements using Korean document quality standards:
 
 **Parser_A (Docling - Structure & Formatting Focused):**
-{d_elem}
+{self._filter_element_for_prompt(d_elem)}
 
 **Parser_B (DocYOLO - Text Recognition Focused):**
-{y_elem}
+{self._filter_element_for_prompt(y_elem)}
 
 **DOCUMENT CONTEXT:**
 {context_info}
@@ -114,7 +111,7 @@ Return the optimal merged element following Korean document standards."""
             prompts.append({
                 "messages": [
                     SystemMessage(content="You are an expert document analyst. The following element was found only by a highly structured parser (Parser_A). Review its content. If it is valid, return it as a JSON object. If it looks like noise, set 'is_valid' to false. OUTPUT LANGUAGE REQUIREMENT: Korean"),
-                    HumanMessage(content=f"Review the following element:\n\nParser_A (Docling):\n{elem}")
+                    HumanMessage(content=f"Review the following element:\n\nParser_A (Docling):\n{self._filter_element_for_prompt(elem)}")
                 ],
                 "original_element": elem
             })
@@ -123,7 +120,7 @@ Return the optimal merged element following Korean document standards."""
              prompts.append({
                 "messages": [
                     SystemMessage(content="You are an expert document analyst. The following element was found only by a text-aggregation-focused parser (Parser_B). Review its content. It might be a valid missing piece or noise. Determine its correct category and text. If it is valid, return it as a JSON object. If it's noise, set 'is_valid' to false. OUTPUT LANGUAGE REQUIREMENT: Korean"),
-                    HumanMessage(content=f"Review the following element and determine its final structure:\n\nParser_B (DocYOLO):\n{elem}")
+                    HumanMessage(content=f"Review the following element and determine its final structure:\n\nParser_B (DocYOLO):\n{self._filter_element_for_prompt(elem)}")
                 ],
                 "original_element": elem
             })
@@ -172,11 +169,18 @@ Return the optimal merged element following Korean document standards."""
         logger.debug(f"[CONTEXT_BUILD] Generated context: {len(context_parts)} parts, "
                     f"total_length={len(result_context)}")
         return result_context
+    
+    def _filter_element_for_prompt(self, element: Element) -> str:
+        filtered = element.copy()
         
-
-
-
-
-
+        base64_removed = filtered.pop('base64_encoding', None)
+        image_path_removed = filtered.pop('image_path', None)
+        
+        if base64_removed or image_path_removed:
+            filtered['has_image'] = True
+            if base64_removed:
+                filtered['image_info'] = {'has_base64': True, 'size': 'large' if len(base64_removed) > 50000 else 'medium'}
+        
+        return str(filtered)
 
         

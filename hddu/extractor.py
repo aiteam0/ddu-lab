@@ -67,6 +67,7 @@ class PageElementsExtractorNode(BaseNode):
         }
 
 
+
 @chain
 def image_entity_extractor(data_batches):
     llm = create_vision_model(
@@ -154,8 +155,8 @@ class ImageEntityExtractorNode(BaseNode):
                 not image_element.image_filename.strip()):
                 
                 if self.verbose:
-                    logger.warning(f"ImageEntityExtractor: skipping element due to missing image file name - "
-                                 f"ID {image_element.id}, page {image_element.page}")
+                    logger.warning(f"ImageEntityExtractor: 이미지 파일명이 없는 요소 건너뛰기 - "
+                                 f"ID {image_element.id}, 페이지 {image_element.page}")
                 
                 element = image_element.copy()
                 element.entity = "No image file available for entity extraction"
@@ -164,7 +165,7 @@ class ImageEntityExtractorNode(BaseNode):
                 valid_images.append(image_element)
 
         if self.verbose and skipped_elements:
-            logger.info(f"ImageEntityExtractor: {len(skipped_elements)} elements skipped due to missing image file name")
+            logger.info(f"ImageEntityExtractor: {len(skipped_elements)}개 요소를 이미지 파일명 부재로 건너뛰었습니다")
 
         for i in range(0, len(valid_images), EXTRACTOR_BATCH_SIZE):
             batch = valid_images[i : i + EXTRACTOR_BATCH_SIZE]
@@ -172,24 +173,25 @@ class ImageEntityExtractorNode(BaseNode):
             extracted_image_entities.extend(batch_results)
         
         if self.verbose and skipped_elements:
-            logger.info(f"ImageEntityExtractor: {len(skipped_elements)} elements skipped from final result")
+            logger.info(f"ImageEntityExtractor: {len(skipped_elements)}개 요소가 최종 결과에서 제외됨")
         
         return {"extracted_image_entities": extracted_image_entities}
     
     def _process_batch_with_retry(self, batch: List, state: ParseState, language: str) -> List:
+        """배치를 retry 전략과 함께 처리합니다."""
         current_batch_size = len(batch)
         current_batch = batch.copy()
         
         for retry_count in range(EXTRACTOR_MAX_RETRIES):
             try:
                 if self.verbose:
-                    logger.info(f"ImageEntityExtractor: processing batch of size {current_batch_size} (attempt {retry_count + 1}/{EXTRACTOR_MAX_RETRIES})")
+                    logger.info(f"ImageEntityExtractor: 배치 크기 {current_batch_size}로 처리 시도 {retry_count + 1}/{EXTRACTOR_MAX_RETRIES}")
                 
                 return self._process_batch(current_batch, state, language)
                 
             except Exception as e:
                 if self.verbose:
-                    logger.error(f"ImageEntityExtractor: batch processing failed (attempt {retry_count + 1}/{EXTRACTOR_MAX_RETRIES}): {str(e)}")
+                    logger.error(f"ImageEntityExtractor: 배치 처리 실패 ({retry_count + 1}/{EXTRACTOR_MAX_RETRIES}): {str(e)}")
                 
                 if retry_count < EXTRACTOR_MAX_RETRIES - 1:
                     new_batch_size = max(1, int(current_batch_size * EXTRACTOR_BATCH_REDUCTION_FACTOR))
@@ -197,15 +199,15 @@ class ImageEntityExtractorNode(BaseNode):
                         current_batch = current_batch[:new_batch_size]
                         current_batch_size = new_batch_size
                         if self.verbose:
-                            logger.info(f"ImageEntityExtractor: batch size reduced to {current_batch_size}")
+                            logger.info(f"ImageEntityExtractor: 배치 크기를 {current_batch_size}로 감소")
                     
                     wait_time = EXTRACTOR_RETRY_DELAY * (2 ** retry_count)
                     if self.verbose:
-                        logger.info(f"ImageEntityExtractor: waiting {wait_time} seconds before retrying")
+                        logger.info(f"ImageEntityExtractor: {wait_time}초 대기 후 재시도")
                     time.sleep(wait_time)
                 else:
                     if self.verbose:
-                        logger.info("ImageEntityExtractor: falling back to individual processing")
+                        logger.info("ImageEntityExtractor: 개별 처리로 fallback")
                     return self._process_individual_fallback(batch, state, language)
         
         return self._process_individual_fallback(batch, state, language)
@@ -225,13 +227,14 @@ class ImageEntityExtractorNode(BaseNode):
                 results.append(element)
             except Exception as e:
                 if self.verbose:
-                    logger.error(f"ImageEntityExtractor: individual processing failed: {str(e)}")
+                    logger.error(f"ImageEntityExtractor: 개별 처리도 실패: {str(e)}")
                 element = image_element.copy()
                 element.entity = "Entity extraction failed"
                 results.append(element)
         return results
     
     def _process_batch(self, batch: List, state: ParseState, language: str) -> List:
+        """단일 배치를 처리합니다."""
         batch_data = []
         for image_element in batch:
             batch_data.append({
@@ -273,8 +276,8 @@ class TableEntityExtractorNode(BaseNode):
                 not table_element.image_filename.strip()):
                 
                 if self.verbose:
-                    logger.warning(f"TableEntityExtractor: skipping table element due to missing image file name - "
-                                 f"ID {table_element.id}, page {table_element.page}")
+                    logger.warning(f"TableEntityExtractor: 이미지 파일명이 없는 테이블 요소 건너뛰기 - "
+                                 f"ID {table_element.id}, 페이지 {table_element.page}")
                 
                 element = table_element.copy()
                 element.entity = "No image file available for entity extraction"
@@ -283,7 +286,7 @@ class TableEntityExtractorNode(BaseNode):
                 valid_tables.append(table_element)
 
         if self.verbose and skipped_elements:
-            logger.info(f"TableEntityExtractor: {len(skipped_elements)} elements skipped due to missing image file name")
+            logger.info(f"TableEntityExtractor: {len(skipped_elements)}개 요소를 이미지 파일명 부재로 건너뛰었습니다")
 
         for i in range(0, len(valid_tables), EXTRACTOR_BATCH_SIZE):
             batch = valid_tables[i : i + EXTRACTOR_BATCH_SIZE]
@@ -291,24 +294,25 @@ class TableEntityExtractorNode(BaseNode):
             extracted_table_entities.extend(batch_results)
         
         if self.verbose and skipped_elements:
-            logger.info(f"TableEntityExtractor: {len(skipped_elements)} elements skipped from final result")
+            logger.info(f"TableEntityExtractor: {len(skipped_elements)}개 요소가 최종 결과에서 제외됨")
         
         return {"extracted_table_entities": extracted_table_entities}
     
     def _process_batch_with_retry(self, batch: List, state: ParseState, language: str) -> List:
+        """배치를 retry 전략과 함께 처리합니다."""
         current_batch_size = len(batch)
         current_batch = batch.copy()
         
         for retry_count in range(EXTRACTOR_MAX_RETRIES):
             try:
                 if self.verbose:
-                    logger.info(f"TableEntityExtractor: processing batch of size {current_batch_size} (attempt {retry_count + 1}/{EXTRACTOR_MAX_RETRIES})")
+                    logger.info(f"TableEntityExtractor: 배치 크기 {current_batch_size}로 처리 시도 {retry_count + 1}/{EXTRACTOR_MAX_RETRIES}")
                 
                 return self._process_batch(current_batch, state, language)
                 
             except Exception as e:
                 if self.verbose:
-                    logger.error(f"TableEntityExtractor: batch processing failed (attempt {retry_count + 1}/{EXTRACTOR_MAX_RETRIES}): {str(e)}")
+                    logger.error(f"TableEntityExtractor: 배치 처리 실패 ({retry_count + 1}/{EXTRACTOR_MAX_RETRIES}): {str(e)}")
                 
                 if retry_count < EXTRACTOR_MAX_RETRIES - 1:
                     new_batch_size = max(1, int(current_batch_size * EXTRACTOR_BATCH_REDUCTION_FACTOR))
@@ -316,15 +320,15 @@ class TableEntityExtractorNode(BaseNode):
                         current_batch = current_batch[:new_batch_size]
                         current_batch_size = new_batch_size
                         if self.verbose:
-                            logger.info(f"TableEntityExtractor: batch size reduced to {current_batch_size}")
+                            logger.info(f"TableEntityExtractor: 배치 크기를 {current_batch_size}로 감소")
                     
                     wait_time = EXTRACTOR_RETRY_DELAY * (2 ** retry_count)
                     if self.verbose:
-                        logger.info(f"TableEntityExtractor: waiting {wait_time} seconds before retrying")
+                        logger.info(f"TableEntityExtractor: {wait_time}초 대기 후 재시도")
                     time.sleep(wait_time)
                 else:
                     if self.verbose:
-                        logger.info("TableEntityExtractor: falling back to individual processing")
+                        logger.info("TableEntityExtractor: 개별 처리로 fallback")
                     return self._process_individual_fallback(batch, state, language)
         
         return self._process_individual_fallback(batch, state, language)
@@ -344,11 +348,22 @@ class TableEntityExtractorNode(BaseNode):
                 results.append(element)
             except Exception as e:
                 if self.verbose:
-                    logger.error(f"TableEntityExtractor: individual processing failed: {str(e)}")
+                    logger.error(f"TableEntityExtractor: 개별 처리도 실패: {str(e)}")
                 element = table_element.copy()
                 element.entity = "Entity extraction failed"
                 results.append(element)
         return results
+    
+    def _estimate_batch_tokens(self, batch: List, state: ParseState) -> int:
+        base_tokens_per_table = 1200
+        context_tokens = 0
+        
+        for element in batch:
+            context = state["texts_by_page"].get(element.page, "")
+            context_tokens += len(context) // 4
+        
+        total_tokens = (base_tokens_per_table * len(batch)) + context_tokens
+        return total_tokens
     
     def _process_batch(self, batch: List, state: ParseState, language: str) -> List:
         batch_data = []

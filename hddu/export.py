@@ -9,7 +9,9 @@ from bs4 import BeautifulSoup
 from .base import BaseNode
 from .state import ParseState
 
+
 class ExportImage(BaseNode):
+
     def __init__(self, verbose=False, **kwargs):
         super().__init__(verbose=verbose, **kwargs)
 
@@ -54,19 +56,23 @@ class ExportImage(BaseNode):
 
 
 class ExportHTML(BaseNode):
+
     def __init__(self, ignore_new_line_in_text=False, verbose=False, **kwargs):
         super().__init__(verbose=verbose, **kwargs)
         self.ignore_new_line_in_text = ignore_new_line_in_text
 
     def _add_base64_src_to_html(self, html, base64_encoding):
+        """HTML 태그에 src 속성을 추가하는 함수"""
         if not base64_encoding:
             return html
 
         pattern = r"<img([^>]*)>"
+        
         replacement = f'<img\\1 src="data:image/png;base64,{base64_encoding}">'
         return re.sub(pattern, replacement, html)
     
     def _add_base64_src_to_html_docling(self, html, base64_encoding):
+        """HTML 태그에 src 속성을 추가하는 함수"""
         if not base64_encoding:
             return html
 
@@ -84,7 +90,6 @@ class ExportHTML(BaseNode):
         html_basename = os.path.splitext(basename)[0] + ".html"
         model = state["metadata"][0]["model"]
         
-        # export 폴더 생성
         export_dir = "export"
         os.makedirs(export_dir, exist_ok=True)
         
@@ -92,7 +97,7 @@ class ExportHTML(BaseNode):
 
         with open(html_filepath, "w", encoding="utf-8") as f:
             for elem in state["elements_from_parser"]:
-                if elem["category"] in ["header1", "header2", "header3", "footer", "footnote"]:
+                if elem["category"] in ["heading1", "heading2", "heading3", "footer", "footnote"]:
                     continue
 
                 if elem["category"] in ["figure", "chart"]:
@@ -121,12 +126,13 @@ class ExportHTML(BaseNode):
                     else:
                         f.write(elem["content"]["html"])
 
-        self.log(f"HTML file created successfully: {html_filepath}")
+        self.log(f"HTML 파일이 성공적으로 생성되었습니다: {html_filepath}")
 
         return {"export": [html_filepath]}
 
 
 class ExportMarkdown(BaseNode):
+
     def __init__(
         self,
         ignore_new_line_in_text=False,
@@ -202,12 +208,13 @@ class ExportMarkdown(BaseNode):
                 else:
                     f.write(elem["content"]["markdown"] + self.separator)
 
-        self.log(f"Markdown file created successfully: {md_filepath}")
+        self.log(f"마크다운 파일이 성공적으로 생성되었습니다: {md_filepath}")
 
         return {"export": [md_filepath]}
 
 
 class ExportTableCSV(BaseNode):
+
     def __init__(self, verbose=False, **kwargs):
         super().__init__(verbose=verbose, **kwargs)
 
@@ -246,10 +253,10 @@ class ExportTableCSV(BaseNode):
                         csv_filepaths.append(absolute_path)
                         elem["csv_filepath"] = absolute_path
                         self.log(
-                            f"CSV file created successfully: {absolute_path}"
+                            f"CSV 파일이 성공적으로 생성되었습니다: {absolute_path}"
                         )
                 except Exception as e:
-                    self.log(f"Error parsing table: {str(e)}")
+                    self.log(f"테이블 파싱 중 오류 발생: {str(e)}")
                     continue
 
         if csv_filepaths:
@@ -258,5 +265,5 @@ class ExportTableCSV(BaseNode):
                 "export": csv_filepaths,
             }
         else:
-            self.log("No tables to convert.")
+            self.log("변환할 테이블이 없습니다.")
             return {"elements_from_parser": state["elements_from_parser"], "export": []}

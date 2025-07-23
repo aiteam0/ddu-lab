@@ -8,10 +8,12 @@ from hddu.config import (
     TRANSLATION_TARGET_LANGUAGE
 )
 
+
 import re
 import json
 import logging
 import time
+import asyncio
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -22,12 +24,16 @@ from langgraph.graph import StateGraph, START, END
 from typing_extensions import TypedDict
 
 from .state import ParseState
-
+from .rate_limit_handler import (
+    TokenUsageTracker, 
+    ExponentialBackoffHandler, 
+    RateLimitAwareAPIClient
+)
 
 
 from .logging_config import get_logger
-
 logger = get_logger(__name__)
+
 
 
 @dataclass
@@ -42,11 +48,9 @@ class TranslationTask:
 
 @dataclass
 class TranslationMapping:
-    """번역 결과 매핑"""
     element_id: str
     element_index: int
     translations: Dict[str, str]
-
 
 class LanguageDetection(BaseModel):
     needs_translation: bool = Field(description="텍스트가 번역이 필요한지 여부")
@@ -75,9 +79,7 @@ class TranslationConfig:
         if self.model_name is not None:
             logger.warning("model_name 파라미터는 더 이상 사용되지 않습니다. .env 파일에서 TEXT_LLM_PROVIDER를 설정하세요.")
 
-
 class MultiFieldTextProcessor:
-    
     @staticmethod
     def clean_text(text: str) -> str:
         if not text or not isinstance(text, str):
@@ -90,7 +92,7 @@ class MultiFieldTextProcessor:
             return cleaned
             
         except Exception as e:
-            logger.warning(f"Text cleaning error: {e}")
+            logger.warning(f"텍스트 정제 중 오류: {e}")
             return str(text).strip() if text else ""
     
     @staticmethod
@@ -112,7 +114,6 @@ class MultiFieldTextProcessor:
         for i, element in enumerate(elements):
             try:
                 element_id = element.get("id", f"element_{i}")
-                
                 content = element.get("content", {})
                 
                 for field_type in ["text", "markdown", "html"]:
@@ -129,7 +130,7 @@ class MultiFieldTextProcessor:
                         tasks.append(task)
                     
             except Exception as e:
-                logger.warning(f"Element {i} processing error: {e}")
+                logger.warning(f"요소 {i} 처리 중 오류: {e}")
                 continue
         
         return tasks
@@ -140,7 +141,6 @@ class MultiFieldTextProcessor:
 
 
 class TextProcessor:
-    
     @staticmethod
     def clean_text(text: str) -> str:
         return MultiFieldTextProcessor.clean_text(text)
@@ -163,21 +163,20 @@ class TextProcessor:
                     texts.append(cleaned)
                     
             except Exception as e:
-                logger.warning(f"Element processing error: {e}")
-                texts.append("[Unprocessable text]")
+                logger.warning(f"요소 처리 중 오류: {e}")
+                texts.append("[처리 불가능한 텍스트]")
         
         return texts
 
 
 class TranslationTaskManager:
-    
     @staticmethod
     def update_task_translation_needs(
         tasks: List[TranslationTask], 
         detection_results: List[LanguageDetection]
     ) -> List[TranslationTask]:
         if len(tasks) != len(detection_results):
-            logger.warning(f"Task count ({len(tasks)}) does not match detection result count ({len(detection_results)})")
+            logger.warning(f"작업 수({len(tasks)})와 감지 결과 수({len(detection_results)})가 일치하지 않습니다.")
             
         for i, (task, detection) in enumerate(zip(tasks, detection_results)):
             task.needs_translation = detection.needs_translation
@@ -195,7 +194,7 @@ class TranslationTaskManager:
         translation_tasks = [task for task in tasks if task.needs_translation]
         
         if len(translation_tasks) != len(translation_results):
-            logger.warning(f"Translation task count ({len(translation_tasks)}) does not match translation result count ({len(translation_results)})")
+            logger.warning(f"번역 작업 수({len(translation_tasks)})와 번역 결과 수({len(translation_results)})가 일치하지 않습니다.")
         
         for task, result in zip(translation_tasks, translation_results):
             if task.element_id not in element_groups:
@@ -219,7 +218,6 @@ class TranslationTaskManager:
 
 
 class ResultMapper:
-    
     @staticmethod
     def apply_translations_to_elements(
         original_elements: List[Dict], 
@@ -250,7 +248,6 @@ class ResultMapper:
 
 
 class LanguageDetector:
-    
     def __init__(self, config: TranslationConfig):
         self.config = config
         self.llm = create_text_model(
@@ -261,6 +258,14 @@ class LanguageDetector:
             LanguageDetection,
             method="json_mode"
         )
+        
+        self.token_tracker = TokenUsageTracker(tpm_limit=200000, model="gpt-4o-mini")
+        self.backoff_handler = ExponentialBackoffHandler(
+            base_delay=1.0, 
+            max_delay=300.0, 
+            max_retries=7
+        )
+        self.api_client = RateLimitAwareAPIClient(self.token_tracker, self.backoff_handler)
         
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a language detection expert for bidirectional translation. Analyze the given text and determine:
@@ -315,6 +320,72 @@ Examples:
         return results
     
     def _process_batch_with_retry(self, batch: List[str]) -> List[LanguageDetection]:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                return self._process_batch_sync_fallback(batch)
+            else:
+                return loop.run_until_complete(self._process_batch_with_retry_async(batch))
+        except RuntimeError:
+            return asyncio.run(self._process_batch_with_retry_async(batch))
+    
+    async def _process_batch_with_retry_async(self, batch: List[str]) -> List[LanguageDetection]:
+        if self.config.verbose:
+            usage_summary = self.api_client.get_usage_summary()
+            logger.info(f"LanguageDetector: 배치 처리 시작 - {usage_summary}")
+            logger.info(f"LanguageDetector: 배치 크기 {len(batch)}")
+        
+        try:
+            total_text = " ".join(batch)
+            estimated_tokens = self.token_tracker.estimate_batch_tokens(
+                batch,
+                prompt_overhead=600
+            )
+            
+            can_proceed, wait_time = self.token_tracker.can_make_request(estimated_tokens)
+            if not can_proceed:
+                if self.config.verbose:
+                    logger.info(f"LanguageDetector: 토큰 한도 근접으로 {wait_time}초 대기...")
+                await asyncio.sleep(wait_time)
+            
+            async def batch_detect_call():
+                return self._process_batch(batch)
+            
+            results = await self.api_client.safe_api_call(
+                batch_detect_call,
+                total_text,
+                request_type="language_detection"
+            )
+            
+            if self.config.verbose:
+                logger.info(f"LanguageDetector: 배치 처리 완료 - {len(results)}개 결과")
+            
+            return results
+            
+        except Exception as e:
+            error_msg = str(e)
+            if self.config.verbose:
+                logger.error(f"LanguageDetector: 배치 처리 실패: {error_msg}")
+            
+            if "rate_limit" in error_msg.lower() or "429" in error_msg:
+                if len(batch) > 1:
+                    if self.config.verbose:
+                        logger.info(f"LanguageDetector: Rate Limit로 인한 실패, 배치를 절반으로 분할하여 재시도")
+                    
+                    mid = len(batch) // 2
+                    first_half = batch[:mid]
+                    second_half = batch[mid:]
+                    
+                    first_results = await self._process_batch_with_retry_async(first_half)
+                    second_results = await self._process_batch_with_retry_async(second_half)
+                    
+                    return first_results + second_results
+            
+            if self.config.verbose:
+                logger.info("LanguageDetector: 개별 처리로 fallback")
+            return await self._process_individual_fallback_async(batch)
+    
+    def _process_batch_sync_fallback(self, batch: List[str]) -> List[LanguageDetection]:
         current_batch_size = len(batch)
         current_batch = batch.copy()
         
@@ -351,6 +422,32 @@ Examples:
         
         return self._process_individual_fallback(batch)
     
+    async def _process_individual_fallback_async(self, batch: List[str]) -> List[LanguageDetection]:
+        results = []
+        for text in batch:
+            try:
+                async def individual_detect_call():
+                    return self.chain.invoke({"text": text})
+                
+                result = await self.api_client.safe_api_call(
+                    individual_detect_call,
+                    text,
+                    request_type="individual_detection"
+                )
+                results.append(result)
+                
+            except Exception as e:
+                if self.config.verbose:
+                    logger.error(f"LanguageDetector: 개별 처리도 실패: {str(e)}")
+                results.append(LanguageDetection(
+                    needs_translation=False,
+                    detected_language="Unknown",
+                    target_language="English",
+                    confidence=0.0,
+                    reason="Detection failed"
+                ))
+        return results
+
     def _process_individual_fallback(self, batch: List[str]) -> List[LanguageDetection]:
         results = []
         for text in batch:
@@ -380,7 +477,6 @@ Examples:
 
 
 class TextTranslator:
-    
     def __init__(self, config: TranslationConfig):
         self.config = config
         self.llm = create_text_model(
@@ -534,8 +630,6 @@ Example for Korean to English:
         return dynamic_chain.invoke({"text": text})
     
 
-
-
 class TranslationState(TypedDict):
     elements: List[Dict]
     translation_tasks: List[TranslationTask]
@@ -546,31 +640,29 @@ class TranslationState(TypedDict):
 
 
 class TranslationWorkflow:
-    
     def __init__(self, config: TranslationConfig):
         self.config = config
         self.detector = LanguageDetector(config)
         self.translator = TextTranslator(config)
     
     def create_graph(self) -> StateGraph:
-        
         def extract_tasks_node(state: TranslationState) -> TranslationState:
             elements = state["elements"]
             
             if self.config.verbose:
-                logger.info(f"Translation tasks extraction started - {len(elements)} elements")
+                logger.info(f"번역 작업 추출 시작 - {len(elements)}개 요소")
             
             translation_tasks = MultiFieldTextProcessor.extract_translation_tasks(elements)
             
             if self.config.verbose:
-                logger.info(f"Translation tasks extraction completed - {len(translation_tasks)} tasks")
+                logger.info(f"번역 작업 추출 완료 - {len(translation_tasks)}개 작업")
                 
                 field_stats = {}
                 for task in translation_tasks:
                     field_stats[task.field_type] = field_stats.get(task.field_type, 0) + 1
                 
                 for field_type, count in field_stats.items():
-                    logger.info(f"  - {field_type}: {count} tasks")
+                    logger.info(f"  - {field_type}: {count}개 작업")
             
             return {"translation_tasks": translation_tasks}
         
@@ -579,11 +671,11 @@ class TranslationWorkflow:
             
             if not translation_tasks:
                 if self.config.verbose:
-                    logger.info("No translation tasks")
+                    logger.info("번역 작업이 없습니다.")
                 return {"detection_results": []}
             
             if self.config.verbose:
-                logger.info(f"Language detection started - {len(translation_tasks)} tasks")
+                logger.info(f"언어 감지 시작 - {len(translation_tasks)}개 작업")
             
             texts = MultiFieldTextProcessor.prepare_batch_from_tasks(translation_tasks)
             
@@ -596,7 +688,7 @@ class TranslationWorkflow:
             if self.config.verbose:
                 need_translation = sum(1 for task in updated_tasks if task.needs_translation)
                 no_translation = len(updated_tasks) - need_translation
-                logger.info(f"Language detection completed - {need_translation} tasks need translation, {no_translation} tasks remain original")
+                logger.info(f"언어 감지 완료 - {need_translation}개 번역 필요, {no_translation}개 원본 유지")
             
             return {
                 "translation_tasks": updated_tasks,
@@ -610,19 +702,19 @@ class TranslationWorkflow:
             
             if not tasks_to_translate:
                 if self.config.verbose:
-                    logger.info("No tasks to translate")
+                    logger.info("번역할 작업이 없습니다.")
                 return {
                     "translation_results": [],
                     "translation_mappings": []
                 }
             
             if self.config.verbose:
-                logger.info(f"Translation started - {len(tasks_to_translate)} tasks")
+                logger.info(f"양방향 번역 시작 - {len(tasks_to_translate)}개 작업")
                 
                 en_to_kr = sum(1 for task in tasks_to_translate if task.target_language == "Korean")
                 kr_to_en = sum(1 for task in tasks_to_translate if task.target_language == "English")
-                logger.info(f"  - English to Korean: {en_to_kr} tasks")
-                logger.info(f"  - Korean to English: {kr_to_en} tasks")
+                logger.info(f"  - 영어→한국어: {en_to_kr}개")
+                logger.info(f"  - 한국어→영어: {kr_to_en}개")
             
             translation_results = self.translator.translate_batch_with_targets(tasks_to_translate)
             
@@ -631,8 +723,8 @@ class TranslationWorkflow:
             )
             
             if self.config.verbose:
-                logger.info(f"Translation completed - {len(translation_results)} texts translated")
-                logger.info(f"Translation mapping created - {len(translation_mappings)} elements")
+                logger.info(f"양방향 번역 완료 - {len(translation_results)}개 텍스트 번역됨")
+                logger.info(f"번역 매핑 생성 - {len(translation_mappings)}개 요소")
             
             return {
                 "translation_results": translation_results,
@@ -644,14 +736,14 @@ class TranslationWorkflow:
             translation_mappings = state.get("translation_mappings", [])
             
             if self.config.verbose:
-                logger.info(f"Translation results applied - {len(translation_mappings)} mappings")
+                logger.info(f"번역 결과 적용 시작 - {len(translation_mappings)}개 매핑")
             
             updated_elements = ResultMapper.apply_translations_to_elements(
                 elements, translation_mappings
             )
             
             if self.config.verbose:
-                logger.info(f"Translation results applied - {len(updated_elements)} elements updated")
+                logger.info(f"번역 결과 적용 완료 - {len(updated_elements)}개 요소 업데이트")
             
             return {"updated_elements": updated_elements}
         
@@ -662,11 +754,11 @@ class TranslationWorkflow:
             
             if needs_translation:
                 if self.config.verbose:
-                    logger.info("Translation node")
+                    logger.info("번역 노드로 이동")
                 return "translate"
             else:
                 if self.config.verbose:
-                    logger.info("Translation not needed, moving to apply_results node")
+                    logger.info("번역 불필요, 결과 적용 노드로 이동")
                 return "apply_results"
         
         workflow = StateGraph(TranslationState)
@@ -713,14 +805,14 @@ def add_translation_module(
         )
         
         if verbose:
-            logger.info(f"Translation module started")
-            logger.info(f"Translation mode: {target_language} (auto = bidirectional translation)")
+            logger.info(f"양방향 번역 모듈 시작")
+            logger.info(f"번역 모드: {target_language} (auto = 자동 양방향 번역)")
         
         elements_to_translate = state.get("elements_from_parser", [])
         
         if not elements_to_translate:
             if verbose:
-                logger.info("No elements to translate")
+                logger.info("번역할 요소가 없습니다.")
             return {}
         
         workflow = TranslationWorkflow(config)
@@ -759,15 +851,15 @@ def add_translation_module(
                     if content.get(field):
                         translation_stats[field] += 1
             
-            logger.info(f"Translation module completed - {original_count} elements processed")
+            logger.info(f"양방향 번역 모듈 완료 - {original_count}개 요소 처리")
             for field, count in translation_stats.items():
                 if count > 0:
-                    logger.info(f"  - {field}: {count} fields translated")
+                    logger.info(f"  - {field}: {count}개 필드 번역됨")
         
         return return_dict
         
     except Exception as e:
-        logger.error(f"Translation module error: {e}")
+        logger.error(f"양방향 번역 모듈 오류: {e}")
         return {}
 
 
@@ -775,4 +867,5 @@ def create_translation_graph(**kwargs) -> StateGraph:
     config = TranslationConfig(**kwargs)
     workflow = TranslationWorkflow(config)
     return workflow.create_graph()
+
 

@@ -6,9 +6,8 @@ import json
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings, ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from langchain_ollama import ChatOllama
-from langchain_ollama import OllamaEmbeddings
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -37,19 +36,34 @@ def _generate_simple_formats(category: str, text: str) -> Tuple[str, str]:
     return markdown, html
 
 def get_page_image_as_base64(image_dir: str, base_filename: str, page_num: int) -> Optional[str]:
-    image_path = os.path.join(image_dir, f"{base_filename}_page_{page_num}.png")
-    logger.debug(f"[IMAGE_LOAD] Looking for page image: {image_path}")
+    import re
+    
+    base_pattern = re.match(r'^(.+?)_(\d{4})_\d{4}$', base_filename)
+    if base_pattern:
+        true_base = base_pattern.group(1)
+        start_page = int(base_pattern.group(2))
+        actual_page = start_page + page_num
+        image_filename = f"{true_base}_page_{actual_page}.png"
+        logger.debug(f"[IMAGE_LOAD] Calculated actual page: {start_page} + {page_num} = {actual_page}")
+    else:
+        image_filename = f"{base_filename}_page_{page_num}.png"
+        logger.debug(f"[IMAGE_LOAD] Using standard naming: {image_filename}")
+        actual_page = page_num
+    
+    image_path = os.path.join(image_dir, image_filename)
+    logger.info(f"[IMAGE_LOAD] Looking for page image: {image_path}")
+    
     if os.path.exists(image_path):
         try:
             with open(image_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode('utf-8')
-                logger.debug(f"[IMAGE_LOAD] Page {page_num}: ✓ loaded (size: {len(image_data)} chars)")
+                logger.info(f"[IMAGE_LOAD] Page {actual_page}: ✓ loaded (size: {len(image_data)} chars)")
                 return image_data
         except Exception as e:
             logger.warning(f"Failed to encode page image {image_path}: {e}")
-            logger.debug(f"[IMAGE_LOAD] Page {page_num}: ✗ encoding failed")
+            logger.warning(f"[IMAGE_LOAD] Page {actual_page}: ✗ encoding failed")
     else:
-        logger.debug(f"[IMAGE_LOAD] Page {page_num}: ✗ file not found")
+        logger.warning(f"[IMAGE_LOAD] Page {actual_page}: ✗ file not found")
     return None
 
 class RateLimitHandler:
@@ -118,7 +132,7 @@ class DocumentAssembler:
             )
         elif config.TEXT_LLM_PROVIDER.upper() == "OLLAMA":
             self.text_llm = ChatOllama(
-                base_url=config.OLLAMA_BASE_URL, 
+                base_url=config.TEXT_OLLAMA_BASE_URL, 
                 model=config.TEXT_OLLAMA_MODEL, 
                 temperature=0.1
             )
@@ -139,32 +153,23 @@ class DocumentAssembler:
             )
         elif config.VISION_LLM_PROVIDER.upper() == "OLLAMA":
             self.vision_llm = ChatOllama(
-                base_url=config.OLLAMA_BASE_URL, 
+                base_url=config.VISION_OLLAMA_BASE_URL, 
                 model=config.VISION_OLLAMA_MODEL, 
                 temperature=0.1
             )
         
-        if config.EMBEDDING_PROVIDER.upper() == "AZURE":
-            self.embedding_model = AzureOpenAIEmbeddings(
-                api_key=config.AZURE_OPENAI_API_KEY, 
-                azure_endpoint=config.AZURE_OPENAI_ENDPOINT, 
-                api_version=config.AZURE_OPENAI_API_VERSION, 
-                azure_deployment=config.EMBEDDING_AZURE_DEPLOYMENT
-            )
-        elif config.EMBEDDING_PROVIDER.upper() == "OPENAI":
-            self.embedding_model = OpenAIEmbeddings(
-                api_key=config.OPENAI_API_KEY, 
-                model=config.EMBEDDING_OPENAI_MODEL
-            )
-        elif config.EMBEDDING_PROVIDER.upper() == "OLLAMA":
-            self.embedding_model = OllamaEmbeddings(
-                base_url=config.OLLAMA_BASE_URL, 
-                model=config.EMBEDDING_OLLAMA_MODEL
-            )
+        self.embedding_model = config.create_embedding_model()
         
         self.matcher = TextMatcher(self.embedding_model)
         self.merger = LLMMerger(self.text_llm, self.vision_llm)
+        
         logger.info("DocumentAssembler initialized successfully.")
+        logger.info(f"Configuration Summary:")
+        logger.info(f"  ├─ LLM Mode: {config.LLM_BASED_ID_ASSIGNMENT}")
+        logger.info(f"  ├─ Assembly Mode: {config.ASSEMBLY_MODE}")
+        logger.info(f"  ├─ Similarity Threshold: {config.SIMILARITY_THRESHOLD}")
+        logger.info(f"  ├─ Text LLM: {config.TEXT_LLM_PROVIDER} ({config.TEXT_OPENAI_MODEL if config.TEXT_LLM_PROVIDER.upper() == 'OPENAI' else 'N/A'})")
+        logger.info(f"  └─ Embedding: {config.EMBEDDING_PROVIDER} ({config.EMBEDDING_OPENAI_MODEL if config.EMBEDDING_PROVIDER.upper() == 'OPENAI' else 'N/A'})")
 
     async def _execute_batch_with_rate_limiting(self, llm: BaseChatModel, prompts: List[Dict[str, Any]], use_async: bool) -> List[Any]:
         if not prompts:
@@ -197,9 +202,9 @@ class DocumentAssembler:
 
     async def _process(self, docling_path: Optional[str], docyolo_path: Optional[str], 
                      output_path: str, use_async: bool, processing_mode: str):
-        
-        logger.info(f"Phase 1: Preparing data for {processing_mode} mode...")
 
+        logger.info(f"Phase 1: Preparing data for {processing_mode} mode...")
+        
         if processing_mode == "merge":
             pages_data = preparer.load_and_group_by_page(docling_path, docyolo_path)
         elif processing_mode == "docling_only":
@@ -214,11 +219,15 @@ class DocumentAssembler:
         image_dir, base_filename = self._determine_image_directory(docling_path, docyolo_path, processing_mode)
         logger.info(f"Image directory: {image_dir}")
 
+        from . import postprocessor
+        logger.info("Standardizing page images before visual processing...")
+        postprocessor.create_standard_page_images(image_dir, base_filename)
+
         for page_num in sorted(pages_data.keys()):
             logger.info(f"--- Starting Page {page_num} ({processing_mode} mode) ---")
             page_content = pages_data[page_num]
             page_image_b64 = get_page_image_as_base64(image_dir, base_filename, page_num)
-
+            
             logger.info(f"Phase 2: Classifying elements for page {page_num}...")
             page_elements = await self._process_page_by_mode(page_content, processing_mode, page_image_b64, use_async, page_num)
             
@@ -226,24 +235,51 @@ class DocumentAssembler:
             logger.info(f"Page {page_num} completed: {len(page_elements)} elements")
             logger.info(f"--- Finished Page {page_num} ---")
 
-        logger.info("Phase 4: Post-processing all elements...")
-        final_unique_elements = self._deduplicate_elements(all_final_elements)
-
-        if processing_mode == "merge" and config.LLM_BASED_ID_ASSIGNMENT:
-            logger.info("Using LLM-based ID assignment...")
+        logger.info(f"Phase 4: Post-processing all elements... ({len(all_final_elements)} total elements)")
+        
+        llm_mode = config.LLM_BASED_ID_ASSIGNMENT.lower()
+        logger.info(f"LLM Mode Decision: {llm_mode.upper()}")
+        logger.info(f"Processing Mode: {processing_mode}")
+        
+        if processing_mode == "merge" and llm_mode in ["simple", "advanced"]:
+            logger.info(f"ACTIVATED: LLM-based ID assignment with deduplication")
+            logger.info(f"  ├─ Deduplication: ENABLED")
+            logger.info(f"  ├─ LLM Processing: ENABLED ({llm_mode})")
+            logger.info(f"  └─ Sort Mode: integrated")
+            
+            logger.info(f"Starting deduplication process...")
+            final_unique_elements = self._deduplicate_elements(all_final_elements)
+            
+            logger.info(f"Starting LLM processing...")
             processed_elements = await postprocessor.finalize_elements_with_llm(
-                final_unique_elements, self.vision_llm, image_dir, base_filename, use_async
+                final_unique_elements, self.vision_llm, image_dir, base_filename, use_async, llm_mode
             )
         else:
-            logger.info("Using coordinate-based ID assignment...")
-            processed_elements = postprocessor.finalize_elements(final_unique_elements)
+            logger.info(f"ACTIVATED: Coordinate-based processing without deduplication")
+            logger.info(f"  ├─ Deduplication: DISABLED")
+            logger.info(f"  ├─ LLM Processing: DISABLED")
+            logger.info(f"  └─ Sort Mode: disabled (parser grouping)")
+            
+            logger.info(f"Starting coordinate-based sorting...")
+            processed_elements = postprocessor.finalize_elements(all_final_elements, sort_mode="disabled")
         
+        logger.info(f"Generating unified content from {len(processed_elements)} elements...")
         unified_content = postprocessor.generate_unified_content(processed_elements)
-
+        
         reference_file = docling_path or docyolo_path
         final_data = preparer.create_final_structure(reference_file, processed_elements, unified_content)
         postprocessor.save_final_json(final_data, output_path)
-        logger.info(f"Document assembly completed: {len(processed_elements)} total elements preserved")
+        
+        logger.info(f"Document assembly completed successfully!")
+        logger.info(f"  ├─ Processing Mode: {processing_mode}")
+        logger.info(f"  ├─ LLM Mode: {llm_mode.upper()}")
+        logger.info(f"  ├─ Final Elements: {len(processed_elements)}")
+        logger.info(f"  ├─ Input Elements: {len(all_final_elements)}")
+        if processing_mode == "merge" and llm_mode in ["simple", "advanced"]:
+            reduction = len(all_final_elements) - len(processed_elements)
+            reduction_rate = (reduction / len(all_final_elements)) * 100 if all_final_elements else 0
+            logger.info(f"  ├─ Elements Reduced: {reduction} ({reduction_rate:.1f}%)")
+        logger.info(f"  └─ Output File: {output_path}")
 
     def run(self, docling_path: Optional[str], docyolo_path: Optional[str], output_path: str, use_async: bool = False):
 
@@ -327,7 +363,7 @@ class DocumentAssembler:
 
     async def _process_page_by_mode(self, page_content: Dict[str, List[Element]], processing_mode: str,
                                    page_image_b64: Optional[str], use_async: bool, page_num: int) -> List[Element]:
-        
+
         if processing_mode == "merge":
             return await self._process_merged_page(page_content, page_image_b64, use_async, page_num)
         elif processing_mode == "docling_only":
@@ -364,6 +400,7 @@ class DocumentAssembler:
 
     async def _process_single_parser_page(self, elements: List[Element], parser_type: str, 
                                         page_image_b64: Optional[str], use_async: bool, page_num: int) -> List[Element]:
+
         texts, tables, figures = preparer.classify_elements(elements)
         
         logger.info(f"{parser_type.title()}: {len(texts)} texts, {len(tables)} tables, {len(figures)} figures")
@@ -480,6 +517,11 @@ class DocumentAssembler:
                 md, html = _generate_simple_formats(res.category, res.text)
                 new_elem['content'] = {'text': res.text, 'markdown': md, 'html': html}
                 
+                if original_element.get('base64_encoding'):
+                    new_elem['base64_encoding'] = original_element['base64_encoding']
+                if original_element.get('image_path'):
+                    new_elem['image_path'] = original_element['image_path']
+                
                 if i < len(matched_texts):
                     d_elem, y_elem = matched_texts[i]
                     docyolo_text = str(y_elem.get('content', {}).get('text', ''))
@@ -542,33 +584,21 @@ class DocumentAssembler:
     def _extract_y_coordinate(self, element: Element) -> float:
         coords = element.get('coordinates', [])
         
-        if isinstance(coords, list) and len(coords) > 0:
+        if coords and isinstance(coords, list) and len(coords) > 0:
             first_coord = coords[0]
             if isinstance(first_coord, dict) and 'y' in first_coord:
-                try:
-                    return float(first_coord['y'])
-                except (ValueError, TypeError):
-                    pass
+                return float(first_coord['y'])
+            elif isinstance(first_coord, (int, float)) and len(coords) > 1:
+                return float(coords[1])
         
-        if isinstance(coords, dict):
-            if 'bbox' in coords:
-                bbox = coords['bbox']
-                if isinstance(bbox, list) and len(bbox) >= 4:
-                    try:
-                        return float(bbox[1])
-                    except (ValueError, TypeError):
-                        pass
-            elif 'y' in coords:
-                try:
-                    return float(coords['y'])
-                except (ValueError, TypeError):
-                    pass
-        
-        return 0.0
+        return float(element.get('id', 0)) * 1000
 
     async def _enhance_visual_element(self, element: Element, page_context: Optional[str], 
                                     surrounding_text: str, task_id: str) -> Element:
-
+            
+        if not page_context:
+            logger.debug(f"[VISUAL] {task_id}: No page context available")
+        
         base64_data = element.get('base64_encoding')
         category = element.get('category', 'figure')
         existing_content = element.get('content', {})
@@ -668,15 +698,7 @@ class DocumentAssembler:
 
     async def _enhance_text_based_table(self, element: Element, page_context: Optional[str], 
                                       surrounding_text: str, task_id: str) -> Element:
-        """
-        base64_encoding이 없는 테이블을 기존 텍스트 정보를 활용해서 향상 처리
-        
-        ※ 처리 방식:
-        - 기존 content의 text, markdown, html 정보를 활용
-        - 텍스트 기반으로 LLM에게 상세 분석 요청
-        - 포괄적 해석과 raw_output 구조 생성
-        """
-        
+
         category = element.get('category', 'table')
         source_parser = element.get('source_parser', 'unknown')
         existing_content = element.get('content', {})
@@ -963,7 +985,7 @@ class DocumentAssembler:
 
 {analysis_instructions}
 
-** OUTPUT REQUIREMENTS **:
+**OUTPUT REQUIREMENTS**:
 - **Text**: 위 분석 요구사항에 따른 포괄적이고 상세한 해석 결과
 - **Markdown**: 
   - 테이블의 경우: 실제 마크다운 테이블 구조 (| 형태)
@@ -974,7 +996,7 @@ class DocumentAssembler:
 
 **중요**: 테이블의 경우 Markdown과 HTML은 실제 구조적 표현을, Text는 포괄적 해석을 제공하세요.
 
-** 핵심 원칙 **:
+**핵심 원칙**:
 1. **완전한 이해**: 사용자가 원본을 보지 않고도 이 해석만으로 모든 내용 이해 가능
 2. **상세한 분석**: 각 요소의 내용을 하나하나 자세히 설명
 3. **맥락적 해석**: 페이지 이미지와 주변 컨텍스트를 적극 활용
@@ -1005,6 +1027,7 @@ class DocumentAssembler:
                                        surrounding_text: str, category: str,
                                        existing_text: str, existing_markdown: str, 
                                        existing_html: str) -> Dict[str, Any]:
+
         
         content_info = []
         if existing_text:
@@ -1109,7 +1132,7 @@ class DocumentAssembler:
     - 후속 분석이나 의사결정에 도움이 되는 통찰 제공
     - 테이블이 전달하고자 하는 핵심 메시지 도출
 
-⚠️ **중요**: 각 분석 항목을 체계적으로 다루되, 단순 나열이 아닌 의미 있는 해석과 통찰을 제공하세요.
+**중요**: 각 분석 항목을 체계적으로 다루되, 단순 나열이 아닌 의미 있는 해석과 통찰을 제공하세요.
 사용자가 이 해석만 읽고도 원본 테이블의 완전한 이해가 가능하도록 작성하세요.
         """
         
@@ -1152,6 +1175,7 @@ class DocumentAssembler:
         
         return {"messages": [HumanMessage(content=content)]}
 
+
     def _normalize_coordinates(self, coordinates) -> str:
 
         if not coordinates:
@@ -1185,10 +1209,23 @@ class DocumentAssembler:
     def _deduplicate_elements(self, elements: List[Element]) -> List[Element]:
 
         if not elements:
+            logger.info("Deduplication: No elements to process")
             return []
+        
+        logger.info(f"Deduplication: Processing {len(elements)} elements...")
+        
+        categories = {}
+        for elem in elements:
+            cat = elem.get('category', 'unknown')
+            categories[cat] = categories.get(cat, 0) + 1
+        
+        logger.info(f"   Categories: {dict(sorted(categories.items()))}")
+        logger.info(f"   Similarity Threshold: {config.SIMILARITY_THRESHOLD}")
         
         unique_elements = []
         signature_to_index = {}
+        duplicates_found = 0
+        similarity_checks = 0
         
         for elem in elements:
             signature = self._calculate_element_signature(elem)
@@ -1200,13 +1237,38 @@ class DocumentAssembler:
                 existing_index = signature_to_index[signature]
                 existing_elem = unique_elements[existing_index]
                 
-                if self._is_better_content(elem, existing_elem):
-                    updated_elem = elem.copy()
-                    if not updated_elem.get('base64_encoding') and existing_elem.get('base64_encoding'):
-                        updated_elem['base64_encoding'] = existing_elem['base64_encoding']
-                    unique_elements[existing_index] = updated_elem
+                similarity_checks += 1
+                is_similar = self._are_similar_by_embedding(elem, existing_elem)
+                
+                if is_similar:
+                    duplicates_found += 1
+                    text1 = elem.get('content', {}).get('text', '')[:30]
+                    text2 = existing_elem.get('content', {}).get('text', '')[:30]
+                    logger.info(f"  🔄 Duplicate found: '{text1}' ≈ '{text2}'")
+                    
+                    if self._is_better_content(elem, existing_elem):
+                        updated_elem = elem.copy()
+                        if not updated_elem.get('base64_encoding') and existing_elem.get('base64_encoding'):
+                            updated_elem['base64_encoding'] = existing_elem['base64_encoding']
+                        unique_elements[existing_index] = updated_elem
+                        logger.debug(f"    → Replaced with better content")
+                    else:
+                        logger.debug(f"    → Kept existing element")
+                else:
+                    modified_signature = f"{signature}_variant_{len(unique_elements)}"
+                    unique_elements.append(elem)
+                    signature_to_index[modified_signature] = len(unique_elements) - 1
         
-        logger.info(f"Deduplication: {len(elements)} → {len(unique_elements)} elements")
+        removal_count = len(elements) - len(unique_elements)
+        removal_rate = (removal_count / len(elements)) * 100 if elements else 0
+        
+        logger.info(f"Deduplication completed:")
+        logger.info(f"  ├─ Input elements: {len(elements)}")
+        logger.info(f"  ├─ Output elements: {len(unique_elements)}")
+        logger.info(f"  ├─ Removed duplicates: {removal_count}")
+        logger.info(f"  ├─ Removal rate: {removal_rate:.1f}%")
+        logger.info(f"  ├─ Similarity checks: {similarity_checks}")
+        logger.info(f"  └─ Duplicates detected: {duplicates_found}")
         return unique_elements
 
     def _calculate_element_signature(self, element: Element) -> str:
@@ -1224,14 +1286,11 @@ class DocumentAssembler:
         
         if not coords:
             element_id = element.get('id', '')
-            text_content = element.get('content', {}).get('text', '')
-            content_hash = abs(hash(text_content)) if text_content else 0
-            return f"{base_signature}_{element_id}_{content_hash}"
+            return f"{base_signature}_{element_id}"
         
         return base_signature
 
     def _is_better_content(self, new_elem: Element, existing_elem: Element) -> bool:
-
 
         status_priority = {
             'enhanced': 3,
@@ -1256,3 +1315,58 @@ class DocumentAssembler:
         existing_text = existing_elem.get('content', {}).get('text', '')
         
         return len(new_text) > len(existing_text)
+
+    def _are_similar_by_embedding(self, elem1: Element, elem2: Element) -> bool:
+
+        try:
+            non_text_categories = {'figure', 'table', 'chart', 'equation'}
+            
+            category1 = elem1.get('category', '')
+            category2 = elem2.get('category', '')
+            
+            if category1 in non_text_categories or category2 in non_text_categories:
+                logger.debug(f"Skipping similarity check for non-text categories: {category1} vs {category2}")
+                return False
+            
+            text1 = elem1.get('content', {}).get('text', '')
+            text2 = elem2.get('content', {}).get('text', '')
+            
+            if not text1 or not text2:
+                return text1 == text2
+            
+            if text1.strip() == text2.strip():
+                return True
+            
+            embeddings = self.embedding_model.embed_documents([text1, text2])
+            
+            if len(embeddings) != 2:
+                logger.warning("Failed to generate embeddings for similarity check")
+                return False
+            
+            import numpy as np
+            
+            vec1 = np.array(embeddings[0])
+            vec2 = np.array(embeddings[1])
+            
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            
+            if norm1 == 0 or norm2 == 0:
+                return False
+            
+            cosine_similarity = np.dot(vec1, vec2) / (norm1 * norm2)
+            
+            is_similar = cosine_similarity >= config.SIMILARITY_THRESHOLD
+            
+            if is_similar:
+                logger.debug(f"Embedding similarity: {cosine_similarity:.3f} >= {config.SIMILARITY_THRESHOLD} - SIMILAR")
+            else:
+                logger.debug(f"Embedding similarity: {cosine_similarity:.3f} < {config.SIMILARITY_THRESHOLD} - DIFFERENT")
+            
+            return is_similar
+            
+        except Exception as e:
+            logger.error(f"Error in embedding similarity check: {e}")
+            text1 = elem1.get('content', {}).get('text', '').strip()
+            text2 = elem2.get('content', {}).get('text', '').strip()
+            return text1 == text2
