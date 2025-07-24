@@ -1,0 +1,35 @@
+# H-DDU 프로젝트 Code Owners
+# 이 파일은 코드 변경사항에 대한 자동 리뷰어 할당을 관리합니다.
+
+# 기본 소유자 (모든 파일)
+* @aiteam0
+
+# 의존성 관리 (Dependabot PR 자동 리뷰)
+requirements*.txt @aiteam0
+pyproject.toml @aiteam0
+Pipfile @aiteam0
+setup.py @aiteam0
+setup.cfg @aiteam0
+
+# GitHub Actions 및 CI/CD
+.github/ @aiteam0
+.github/workflows/ @aiteam0
+.github/dependabot.yml @aiteam0
+
+# 핵심 H-DDU 컴포넌트
+src/h_ddu/ @aiteam0
+src/h_ddu/parser/ @aiteam0
+src/h_ddu/extractor/ @aiteam0
+src/h_ddu/assembly/ @aiteam0
+
+# 문서화
+docs/ @aiteam0
+*.md @aiteam0
+*.rst @aiteam0
+
+# 설정 파일
+*.yml @aiteam0
+*.yaml @aiteam0
+*.toml @aiteam0
+*.cfg @aiteam0
+*.ini @aiteam0
