@@ -45,7 +45,7 @@ dependencies = [
     "omegaconf>=2.3.0",
     "pyarrow>=20.0.0",
     "fastparquet>=2024.11.0",
-    "docling==2.15.1",
+    "docling==2.42.1",
     "langchain-teddynote>=0.3.45",
     "markdownify>=1.1.0",
     "evaluate>=0.4.3",
