@@ -157,7 +157,7 @@ def _is_single_noise(element: Dict) -> bool:
     #     return True
     
     # 3. 단일 특수문자 (".", "_")
-    if len(stripped_text) == 1 and stripped_text in '._':
+    if len(stripped_text) == 1 and stripped_text in '._:■':
         logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: single special char '{stripped_text}'")
         return True
     
