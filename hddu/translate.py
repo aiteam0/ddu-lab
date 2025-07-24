@@ -813,7 +813,7 @@ def add_translation_module(
         if not elements_to_translate:
             if verbose:
                 logger.info("번역할 요소가 없습니다.")
-            return {}
+            return {"language": "Korean"}
         
         workflow = TranslationWorkflow(config)
         graph = workflow.create_graph()
