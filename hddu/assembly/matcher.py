@@ -12,8 +12,18 @@ class TextMatcher:
         if not hasattr(embedding_model, 'embed_documents'): raise TypeError("embedding_model must be a valid LangChain Embeddings instance.")
         self.embedding_model = embedding_model
     def match_text_elements(self, d_texts: List[Element], y_texts: List[Element]) -> MatchResult:
-        if not d_texts or not y_texts: return [], d_texts, y_texts
-        d_contents, y_contents = [str(e.get('content', {}).get('text', '')) for e in d_texts], [str(e.get('content', {}).get('text', '')) for e in y_texts]
+        if not d_texts:
+            d_contents = [str(e.get('content', {}).get('markdown', '')) for e in d_texts]
+        else:
+            d_contents = [str(e.get('content', {}).get('text', '')) for e in d_texts]
+
+        if not y_texts:
+            y_contents = [str(e.get('content', {}).get('markdown', '')) for e in y_texts]
+        else:
+            y_contents = [str(e.get('content', {}).get('text', '')) for e in y_texts]
+        
+        #d_contents, y_contents = [str(e.get('content', {}).get('text', '')) for e in d_texts], [str(e.get('content', {}).get('text', '')) for e in y_texts]
+        
         if not d_contents or not y_contents: return [], d_texts, y_texts
         try:
             vecs = self.embedding_model.embed_documents(d_contents + y_contents)
@@ -29,6 +39,6 @@ class TextMatcher:
                 pairs.append((d_texts[i], y_texts[best_y])); d_matched.add(i); y_matched.add(best_y)
                 sim_matrix[:, best_y] = -1
         d_only, y_only = [e for i, e in enumerate(d_texts) if i not in d_matched], [e for j, e in enumerate(y_texts) if j not in y_matched]
-        logger.info(f"Text matching: {len(pairs)} pairs, {len(d_only)} docling-only, {len(y_only)} docyolo-only.")
+        logger.info(f"Text matching: {len(pairs)} pairs, {len(d_only)} docling-only, {len(y_only)} docyolo-only.")        
         return pairs, d_only, y_only
 

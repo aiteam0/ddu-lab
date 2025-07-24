@@ -27,10 +27,10 @@ def normalize_bbox_and_to_coordinates(bbox, page_width, page_height):
     norm_y_max = y_max / page_height
 
     coordinates = [
-        {"x": round(norm_x_min, 4), "y": round(norm_y_min, 4)},
-        {"x": round(norm_x_max, 4), "y": round(norm_y_min, 4)},
-        {"x": round(norm_x_max, 4), "y": round(norm_y_max, 4)},
-        {"x": round(norm_x_min, 4), "y": round(norm_y_max, 4)},
+        {"x": norm_x_min, "y": norm_y_min},
+        {"x": norm_x_max, "y": norm_y_min},
+        {"x": norm_x_max, "y": norm_y_max},
+        {"x": norm_x_min, "y": norm_y_max},
     ]
     return coordinates
 
@@ -65,222 +65,299 @@ def extract_text_from_html(html_string):
     text = re.sub(r'\s+', ' ', text).strip()
     return html.unescape(text)
 
-def convert_content_list(content_list_data, middle_data, local_image_dir_path):
+def analyze_text_content_pattern(text_content):
+    if not text_content:
+        return "paragraph"
+    
+    text_stripped = text_content.strip()
+    
+    if re.match(r'^[-•*]\s+', text_stripped) or re.match(r'^\d+\.\s+', text_stripped):
+        return "list"
+    
+    # 수식 패턴  
+    # if re.search(r'\$.*\$|\\[a-zA-Z]+|∫|∑|∂|α|β|γ|θ|π', text_stripped):
+    #     return "equation"
+    
+    # 각주 패턴
+    if re.match(r'^\d+\)\s+|^\[\d+\]\s+|^※\s+', text_stripped):
+        return "footnote"
+    
+    # 페이지 헤더/푸터 패턴
+    if len(text_stripped) < 50 and re.search(r'\d+|page|페이지', text_stripped.lower()):
+        return "header"  # 위치에 따라 footer로 변경될 수 있음
+    
+    return "paragraph"
+
+def determine_enhanced_category(content_item, middle_block):
+    
+    content_type = content_item.get("type", "")
+    text_content = content_item.get("text", "")
+    text_level = content_item.get("text_level")
+    
+    if content_type == "title":
+        return "heading1"
+    elif content_type == "reference":
+        return "reference"
+    elif content_type == "figure":
+        return "figure"
+    elif content_type == "image":
+        return "figure"
+    elif content_type == "figure_caption":
+        return "caption"
+    elif content_type == "table":
+        return "table"
+    elif content_type == "table_caption":
+        return "caption"
+    elif content_type == "text":
+        if text_level == 1:
+            return "heading1"
+        elif text_level == 2:
+            return "heading2"
+        elif text_level == 3:
+            return "heading3"
+        else:
+            return analyze_text_content_pattern(text_content)
+    
+    return "paragraph"
+
+def extract_image_info_with_path(content_item, middle_block, doc_filename, type_counters):
+    
+    img_path = content_item.get("img_path")
+    if not img_path:
+        return None
+    
+    file_extension = '.png'
+    
+    page_no = content_item.get("page_idx", 0) + 1
+    original_type = content_item.get("type", "image")
+    
+    if original_type == "table":
+        category_name = "table"
+        type_counters["table"] = type_counters.get("table", 0) + 1
+        counter = type_counters["table"]
+    elif original_type in ["image", "figure", "chart"]:
+        category_name = "picture"
+        type_counters["picture"] = type_counters.get("picture", 0) + 1
+        counter = type_counters["picture"]
+    else:
+        category_name = "text"
+        type_counters["text"] = type_counters.get("text", 0) + 1
+        counter = type_counters["text"]
+    
+    new_filename = f"{doc_filename}-page-{page_no}-{category_name}-{counter}{file_extension}"
+    
+    return {
+        "original_path": img_path,
+        "new_filename": new_filename,
+        "image_path": new_filename,
+        "needs_rename": True,
+        "category_name": category_name
+    }
+
+def get_page_size_for_content(content_item, middle_data):
+    page_idx = content_item.get("page_idx", 0)
+    
+    if page_idx < len(middle_data["pdf_info"]):
+        return middle_data["pdf_info"][page_idx]["page_size"]
+    
+    if len(middle_data["pdf_info"]) > 0:
+        return middle_data["pdf_info"][0]["page_size"]
+    
+    return [595.0, 842.0]
+
+def create_perfect_coordinates_mapping_v2(content_list_data, middle_data, doc_filename):
+    
+    coordinates_map = {}
+    type_counters = {}
+    
+    if not middle_data or "pdf_info" not in middle_data:
+        logger.warning("Middle.json data is missing. Creating coordinates map without bbox info.")
+        return coordinates_map
+    
+    preproc_blocks = []
+    for page_info in middle_data["pdf_info"]:
+        preproc_blocks.extend(page_info.get("preproc_blocks", []))
+    
+    logger.info(f"Perfect matching: {len(content_list_data)} content items with {len(preproc_blocks)} preproc_blocks")
+    
+    for i, content_item in enumerate(content_list_data):
+        coordinates = None
+        middle_block = None
+        
+        if i < len(preproc_blocks):
+            middle_block = preproc_blocks[i]
+            bbox = middle_block.get("bbox")
+            
+            if bbox and len(bbox) == 4:
+                element_page_width, element_page_height = get_page_size_for_content(content_item, middle_data)
+                coordinates = normalize_bbox_and_to_coordinates(bbox, element_page_width, element_page_height)
+                logger.debug(f"Perfect match {i}: bbox {bbox} → coordinates {coordinates} (page_size: {element_page_width}x{element_page_height})")
+            else:
+                logger.warning(f"Perfect match {i}: invalid bbox {bbox}")
+        else:
+            logger.warning(f"Perfect match {i}: no corresponding preproc_block (index out of range)")
+        
+        category = determine_enhanced_category(content_item, middle_block)
+        
+        image_info = extract_image_info_with_path(content_item, middle_block, doc_filename, type_counters)
+        
+        coordinates_map[i] = {
+            "coordinates": coordinates,
+            "category": category,
+            "content_item": content_item,
+            "middle_block": middle_block,
+            "image_info": image_info
+        }
+        
+        logger.debug(f"Perfect mapping {i}: {content_item.get('type')} → {category}")
+    
+    logger.info(f"Perfect coordinates mapping completed: {len(coordinates_map)} items mapped")
+    logger.info(f"Type counters: {type_counters}")
+    return coordinates_map
+
+def convert_content_list(content_list_data, middle_data, local_image_dir_path, content_list_file_path=None):
+
     upstage_result = {
         "api": "2.0",
-        "model": "converted-from-content-list-v2",
+        "model": "converted-from-content-list-v3-enhanced-fixed",
         "usage": {},
         "content": {"html": "", "markdown": "", "text": ""},
         "elements": []
     }
+    
+    doc_filename = "document"
+    if content_list_file_path:
+        base_filename = os.path.basename(content_list_file_path)
+        if base_filename.endswith('_content_list.json'):
+            doc_filename = base_filename.replace('_content_list.json', '').replace('.pdf', '')
+            logger.info(f"Extracted doc_filename from file path: '{doc_filename}'")
+    elif local_image_dir_path:
+        parent_dir = os.path.dirname(local_image_dir_path)
+        if parent_dir:
+            for file in os.listdir(parent_dir):
+                if file.endswith('_content_list.json'):
+                    doc_filename = file.replace('_content_list.json', '').replace('.pdf', '')
+                    logger.warning(f"Using fallback doc_filename extraction: '{doc_filename}'")
+                    break
 
-    coordinates_map = {}
     total_pages = 0
+    page_width, page_height = 595.0, 842.0
+    
     if middle_data and "pdf_info" in middle_data:
         total_pages = len(middle_data["pdf_info"])
-        logger.info(f"Processing {total_pages} pages from middle.json")
-        for page_info in middle_data["pdf_info"]:
-            page_idx = page_info.get("page_idx", 0)
-            page_size = page_info.get("page_size")
-            if not page_size or len(page_size) != 2:
-                logger.warning(f"Page {page_idx}: Missing or invalid page_size. Coordinates may be incorrect.")
-                page_width, page_height = 1.0, 1.0
-            else:
-                page_width, page_height = page_size
-
-            for item_type in ["images", "tables"]:
-                items = page_info.get(item_type, [])
-                logger.debug(f"Page {page_idx}: Processing {len(items)} {item_type}")
-                for item in items:
-                    bbox = item.get("bbox")
-                    logger.debug(f"Item on page {page_idx}: type={item.get('type')}, bbox={bbox}")
-                    img_path_in_middle = None
-                    
-                    try:
-                        if item.get("blocks"):
-                            for block in item["blocks"]:
-                                if block.get("lines"):
-                                    for line in block["lines"]:
-                                        if line.get("spans"):
-                                            for span in line["spans"]:
-                                                if span.get("type") == "image" or span.get("type") == "table":
-                                                    img_path_in_middle = span.get("image_path")
-                                                    logger.debug(f"Found image_path in middle.json: {img_path_in_middle} on page {page_idx}")
-                                                    break
-                                            if img_path_in_middle: break
-                                        if img_path_in_middle: break
-                                if img_path_in_middle: break
-                    except Exception as e:
-                        logger.error(f"Error while searching for image_path on page {page_idx}: {e}")
-                        logger.debug(f"Item structure that caused error: {item}")
-                    
-                    logger.debug(f"Condition check: img_path_in_middle={img_path_in_middle is not None}, bbox={bbox is not None}")
-                    if img_path_in_middle and bbox:
-                        logger.debug(f"Processing image: {img_path_in_middle}, bbox: {bbox}")
-                        filename = get_image_filename(img_path_in_middle)
-                        logger.debug(f"Extracted filename: {filename}")
-                        if filename:
-                            logger.debug(f"Normalizing bbox {bbox} with page_size ({page_width}, {page_height})")
-                            coords = normalize_bbox_and_to_coordinates(bbox, page_width, page_height)
-                            logger.debug(f"Normalized coords: {coords}")
-                            if coords:
-                                if filename in coordinates_map:
-                                    logger.warning(f"Duplicate filename found: {filename}. Previous: page {coordinates_map[filename]['page_idx_middle']}, Current: page {page_idx}")
-                                    unique_key = f"{filename}_page_{page_idx}"
-                                    coordinates_map[unique_key] = {
-                                        "coordinates": coords,
-                                        "page_idx_middle": page_idx,
-                                        "original_filename": filename
-                                    }
-                                    logger.info(f"Added coordinates for {unique_key} (bbox: {bbox})")
-                                else:
-                                    coordinates_map[filename] = {
-                                        "coordinates": coords,
-                                        "page_idx_middle": page_idx
-                                    }
-                                    logger.info(f"Added coordinates for {filename} on page {page_idx} (bbox: {bbox})")
-                            else:
-                                logger.warning(f"Failed to normalize bbox {bbox} for {img_path_in_middle}")
-                        else:
-                            logger.warning(f"Failed to extract filename from {img_path_in_middle}")
-                    else:
-                        if not img_path_in_middle:
-                            logger.debug(f"No image_path found in {item_type} item on page {page_idx}")
-                        if not bbox:
-                            logger.debug(f"No bbox found in {item_type} item on page {page_idx}: {item}")
-                            logger.debug(f"Item structure: {item}")
+        logger.info(f"Processing {total_pages} pages from middle.json (Enhanced Version)")
         
-        logger.info(f"Total coordinates_map entries: {len(coordinates_map)}")
-        logger.debug(f"Coordinates map keys: {list(coordinates_map.keys())}")
+        if total_pages > 0:
+            page_info = middle_data["pdf_info"][0]
+            page_size = page_info.get("page_size")
+            if page_size and len(page_size) == 2:
+                page_width, page_height = page_size
+                logger.info(f"Using page size: {page_width} x {page_height}")
+            else:
+                logger.warning(f"Missing or invalid page_size. Using default: {page_width} x {page_height}")
     else:
-        logger.warning("Middle.json data is missing or invalid. Coordinates and page count might be inaccurate.")
+        logger.warning("Middle.json data is missing. Using default page size and estimating pages.")
         if content_list_data:
             max_page_idx = 0
             for item in content_list_data:
                 if "page_idx" in item and item["page_idx"] > max_page_idx:
                     max_page_idx = item["page_idx"]
             total_pages = max_page_idx + 1
-
-
+    
     upstage_result["usage"]["pages"] = total_pages
+    
+    coordinates_map = create_perfect_coordinates_mapping_v2(
+        content_list_data, middle_data, doc_filename
+    )
 
     all_elements_html = []
     all_elements_markdown = []
     all_elements_text = []
 
     for idx, content_item in enumerate(content_list_data):
+        mapping_info = coordinates_map.get(idx, {})
+        
         element_upstage = {
             "id": idx,
             "page": content_item.get("page_idx", 0) + 1,
-            "category": "",
+            "category": mapping_info.get("category", "paragraph"),
             "content": {"html": "", "markdown": "", "text": ""},
-            "coordinates": None,
+            "source_parser": "docyolo"
         }
+        
+        coordinates = mapping_info.get("coordinates")
+        if coordinates:
+            element_upstage["coordinates"] = coordinates
+        
+        image_info = mapping_info.get("image_info")
+        if image_info:
+            element_upstage["image_path"] = image_info["image_path"]
+            
+            original_path = image_info["original_path"]
+            if original_path:
+                filename_for_b64 = get_image_filename(original_path)
+                if filename_for_b64:
+                    actual_image_path = os.path.join(local_image_dir_path, filename_for_b64)
+                    b64_data = encode_image_to_base64(actual_image_path)
+                    if b64_data:
+                        element_upstage["base64_encoding"] = b64_data
+                        logger.debug(f"Base64 encoded for element {idx}: {filename_for_b64}")
+                        
+                        new_filename = image_info["new_filename"]
+                        new_image_path = os.path.join(local_image_dir_path, new_filename)
+                        try:
+                            import shutil
+                            shutil.copy2(actual_image_path, new_image_path)
+                            logger.info(f"[FILE_SAVE] Saved image: {filename_for_b64} → {new_filename}")
+                        except Exception as e:
+                            logger.warning(f"[FILE_SAVE] Failed to save {new_filename}: {e}")
 
         item_type = content_item.get("type")
         text_content = content_item.get("text", "")
         text_level = content_item.get("text_level")
         img_path = content_item.get("img_path")
         
-        if item_type == "text":
-            if text_level:
-                element_upstage["category"] = f"heading{text_level}"
-            elif text_content.strip().startswith(("- ", "* ", "• ")) or re.match(r"^\d+\.\s", text_content.strip()):
-                element_upstage["category"] = "list"
-            else:
-                element_upstage["category"] = "paragraph"
-        elif item_type == "table":
-            element_upstage["category"] = "table"
-        elif item_type == "image":
-            element_upstage["category"] = "figure"
-        elif item_type == "equation":
-            element_upstage["category"] = "equation"
-        else:
-            element_upstage["category"] = "unknown"
-            logger.warning(f"Unknown item type: {item_type} for item id {idx}")
-
-        element_upstage["source_parser"] = "docyolo"
-
-        if element_upstage["category"] in ["figure", "table"] and img_path:
-            filename_cl = get_image_filename(img_path)
-            if filename_cl:
-                logger.debug(f"Looking for coordinates for {filename_cl} (from img_path: {img_path}) on page {content_item.get('page_idx', 0)}")
-                
-                coords_found = False
-                if filename_cl in coordinates_map:
-                    if coordinates_map[filename_cl]["page_idx_middle"] == content_item.get("page_idx", 0):
-                        element_upstage["coordinates"] = coordinates_map[filename_cl]["coordinates"]
-                        coords_found = True
-                        logger.debug(f"Found coordinates for {filename_cl} using exact match")
-                    else:
-                        logger.warning(f"Page index mismatch for image {filename_cl}: content_list has {content_item.get('page_idx', 0)}, middle.json has {coordinates_map[filename_cl]['page_idx_middle']}. Trying alternative matching.")
-                
-                if not coords_found:
-                    page_specific_key = f"{filename_cl}_page_{content_item.get('page_idx', 0)}"
-                    if page_specific_key in coordinates_map:
-                        element_upstage["coordinates"] = coordinates_map[page_specific_key]["coordinates"]
-                        coords_found = True
-                        logger.debug(f"Found coordinates for {filename_cl} using page-specific key: {page_specific_key}")
-                
-                if not coords_found:
-                    for key, coord_info in coordinates_map.items():
-                        if (key.startswith(filename_cl) and 
-                            "_page_" in key and 
-                            coord_info.get("original_filename") == filename_cl):
-                            element_upstage["coordinates"] = coord_info["coordinates"]
-                            coords_found = True
-                            logger.warning(f"Found coordinates for {filename_cl} using fallback match with key: {key} (page mismatch)")
-                            break
-                
-                if not coords_found:
-                    logger.warning(f"Coordinates not found in middle.json for image: {filename_cl} (from content_list img_path: {img_path})")
-                    logger.debug(f"Available coordinates_map keys: {list(coordinates_map.keys())}")
-            else:
-                logger.warning(f"Could not extract filename from img_path: {img_path}")
-
-
-        if element_upstage["category"] in ["figure", "table"] and img_path:
-            logger.info(f"[DOCYOLO_B64] processing: {element_upstage['category']} element {idx} with img_path: {img_path}")
-            
-            filename_for_b64 = get_image_filename(img_path)
-            if filename_for_b64:
-                actual_image_path = os.path.join(local_image_dir_path, filename_for_b64)
-                logger.info(f"[DOCYOLO_B64] path: {actual_image_path}")
-                
-                b64_data = encode_image_to_base64(actual_image_path)
-                if b64_data:
-                    element_upstage["base64_encoding"] = b64_data
-                    logger.info(f"[DOCYOLO_B64] result: success for {filename_for_b64}")
-                else:
-                    element_upstage["base64_encoding"] = None 
-                    logger.warning(f"[DOCYOLO_B64] result: failure for {filename_for_b64} (encoding returned None)")
-            else:
-                element_upstage["base64_encoding"] = None
-                logger.warning(f"[DOCYOLO_B64] result: failure - filename extraction failed from img_path: {img_path}")
-        elif element_upstage["category"] in ["figure", "table"]:
-            logger.info(f"[DOCYOLO_B64] skip: {element_upstage['category']} element {idx} has no img_path")
-
-
         md_content = ""
         html_content = ""
         plain_text_content = ""
 
         escaped_text = html.escape(text_content)
+        category = element_upstage["category"]
 
-        if element_upstage["category"].startswith("heading"):
-            level = int(element_upstage["category"].replace("heading", ""))
+        if category.startswith("heading"):
+            level = int(category.replace("heading", ""))
             md_content = f"{'#' * level} {text_content}"
             html_content = f"<h{level} id='{idx}'>{escaped_text}</h{level}>"
             plain_text_content = text_content
-        elif element_upstage["category"] == "list":
+        elif category == "list":
             md_content = text_content
-            html_content = f"<p id='{idx}' data-category='list'>{escaped_text}</p>"
+            html_content = f"<ul id='{idx}'><li>{escaped_text.replace(chr(10), '</li><li>')}</li></ul>"
             plain_text_content = text_content
-        elif element_upstage["category"] == "paragraph":
+        elif category == "paragraph":
             md_content = text_content
-            html_content = f"<p id='{idx}' data-category='paragraph'>{escaped_text}</p>"
+            html_content = f"<p id='{idx}'>{escaped_text}</p>"
             plain_text_content = text_content
-        elif element_upstage["category"] == "table":
+        elif category == "reference":
+            md_content = text_content
+            html_content = f"<p id='{idx}' data-category='reference'>{escaped_text}</p>"
+            plain_text_content = text_content
+        elif category == "caption":
+            md_content = f"*{text_content}*"
+            html_content = f"<figcaption id='{idx}'>{escaped_text}</figcaption>"
+            plain_text_content = text_content
+        elif category == "footnote":
+            md_content = text_content
+            html_content = f"<p id='{idx}' data-category='footnote'>{escaped_text}</p>"
+            plain_text_content = text_content
+        elif category == "header":
+            md_content = text_content
+            html_content = f"<header id='{idx}'>{escaped_text}</header>"
+            plain_text_content = text_content
+        elif category == "footer":
+            md_content = text_content
+            html_content = f"<footer id='{idx}'>{escaped_text}</footer>"
+            plain_text_content = text_content
+        elif category == "table":
             table_body_html = content_item.get("table_body", "<table></table>")
             table_caption_list = content_item.get("table_caption", [])
             caption_text = " ".join(table_caption_list)
@@ -288,53 +365,52 @@ def convert_content_list(content_list_data, middle_data, local_image_dir_path):
             md_content = table_body_html
             
             if caption_text:
-                if "<table>" in table_body_html.lower():
-                    table_body_with_caption = table_body_html.lower().replace("<table>", f"<table><caption id='cap_{idx}'>{html.escape(caption_text)}</caption>", 1)
-                    match = re.search(r"<table.*?>", table_body_html, re.IGNORECASE)
-                    if match:
-                        table_tag_end = match.end()
-                        html_content = f"{table_body_html[:table_tag_end]}<caption id='cap_{idx}'>{html.escape(caption_text)}</caption>{table_body_html[table_tag_end:]}"
-                        html_content = re.sub(r"(<table)", rf"\1 id='{idx}'", html_content, 1, flags=re.IGNORECASE)
-                    else:
-                         html_content = re.sub(r"(<table)", rf"\1 id='{idx}'", table_body_html, 1, flags=re.IGNORECASE) if table_body_html else f"<table id='{idx}'></table>"
-
+                match = re.search(r"<table.*?>", table_body_html, re.IGNORECASE)
+                if match:
+                    table_tag_end = match.end()
+                    html_content = f"{table_body_html[:table_tag_end]}<caption id='cap_{idx}'>{html.escape(caption_text)}</caption>{table_body_html[table_tag_end:]}"
+                    html_content = re.sub(r"(<table)", rf"\1 id='{idx}'", html_content, 1, flags=re.IGNORECASE)
                 else:
-                    html_content = f"<table id='{idx}'><caption id='cap_{idx}'>{html.escape(caption_text)}</caption>{table_body_html}</table>"
+                    html_content = re.sub(r"(<table)", rf"\1 id='{idx}'", table_body_html, 1, flags=re.IGNORECASE) if table_body_html else f"<table id='{idx}'></table>"
             else:
                 html_content = re.sub(r"(<table)", rf"\1 id='{idx}'", table_body_html, 1, flags=re.IGNORECASE) if table_body_html else f"<table id='{idx}'></table>"
 
             plain_text_content = extract_text_from_html(table_body_html)
             if caption_text:
                 plain_text_content = caption_text + "\n" + plain_text_content
-
-        elif element_upstage["category"] == "figure":
+        elif category in ["figure", "chart"]:
             img_caption_list = content_item.get("img_caption", [])
             caption_text = " ".join(img_caption_list) if img_caption_list else ""
             alt_text = html.escape(caption_text)
-            md_img_path = img_path if img_path else "placeholder.jpg"
-            md_content = f"![{alt_text}]({md_img_path})"
+            
+            display_path = element_upstage.get("image_path", img_path or "placeholder.jpg")
+            md_content = f"![{alt_text}]({display_path})"
             
             if caption_text:
-                html_content = f"<figure id='{idx}'><img alt=\"{alt_text}\" src=\"{html.escape(img_path if img_path else '')}\"/><figcaption>{html.escape(caption_text)}</figcaption></figure>"
+                html_content = f"<figure id='{idx}' data-category='{category}'><img alt=\"{alt_text}\" src=\"{html.escape(display_path)}\"/><figcaption>{html.escape(caption_text)}</figcaption></figure>"
             else:
-                html_content = f"<figure id='{idx}'><img alt=\"{alt_text}\" src=\"{html.escape(img_path if img_path else '')}\"/></figure>"
+                html_content = f"<figure id='{idx}' data-category='{category}'><img alt=\"{alt_text}\" src=\"{html.escape(display_path)}\"/></figure>"
             
             plain_text_content = caption_text
-        elif element_upstage["category"] == "equation":
+        elif category == "equation":
             latex_content = text_content
             md_content = f"$${latex_content}$$"
             html_content = f"<p id='{idx}' data-category='equation'>$${html.escape(latex_content)}$$</p>"
             plain_text_content = latex_content
+        else:
+            md_content = text_content
+            html_content = f"<p id='{idx}' data-category='{category}'>{escaped_text}</p>"
+            plain_text_content = text_content
 
         element_upstage["content"]["markdown"] = md_content
         element_upstage["content"]["html"] = html_content
         element_upstage["content"]["text"] = plain_text_content.strip()
         
-        if element_upstage["category"] == "figure":
+        if category in ["figure", "chart"]:
             img_caption_list = content_item.get("img_caption", [])
             if img_caption_list:
                 element_upstage["content"]["caption"] = " ".join(img_caption_list)
-        elif element_upstage["category"] == "table":
+        elif category == "table":
             table_caption_list = content_item.get("table_caption", [])
             if table_caption_list:
                 element_upstage["content"]["caption"] = " ".join(table_caption_list)
@@ -382,7 +458,8 @@ if __name__ == "__main__":
 
     content_list_file = os.path.join(local_dir,"content_list.json")
     middle_file = os.path.join(local_dir,"middle.json")
-    output_file_name = os.path.basename(content_list_file).replace("_content_list.json", "_docyolo_to_upstage_result.json")
+
+    output_file_name = os.path.basename(content_list_file).replace("_content_list.json", "_docyolo_to_result.json")
     output_file = os.path.join(local_dir,output_file_name)
 
     try:

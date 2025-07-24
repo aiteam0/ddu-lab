@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 CATEGORY_MAPPING_SEGMENTS = {
     "section_header": "heading1",
     "text": "paragraph",
-    "list_item": "list_item", 
+    "list_item": "list", 
     "caption": "caption",
     "footnote": "footnote",
     "page_header": "header",
@@ -48,10 +48,10 @@ def generate_pixel_data_coord(
     x1_norm, y1_norm, x2_norm, y2_norm = bbox_norm
     page_width_px = page_width_pts * (dpi / 72.0)
     page_height_px = page_height_pts * (dpi / 72.0)
-    px_left = int(x1_norm * page_width_px)
-    px_top = int(y1_norm * page_height_px)
-    px_right = int(x2_norm * page_width_px)
-    px_bottom = int(y2_norm * page_height_px)
+    px_left = x1_norm * page_width_px
+    px_top = y1_norm * page_height_px
+    px_right = x2_norm * page_width_px
+    px_bottom = y2_norm * page_height_px
     return f"top-left:({px_left},{px_top}); bottom-right:({px_right},{px_bottom})"
 
 def ocr_to_latex_simple(ocr_text: str) -> str:
@@ -137,6 +137,7 @@ def get_abs_image_path_robust(docling_pipeline_output_dir: str, path_in_parquet:
     return ""
 
 def get_abs_image_path(docling_pipeline_output_dir: str, path_in_parquet: str) -> str:
+
     return get_abs_image_path_robust(docling_pipeline_output_dir, path_in_parquet)
 
 def html_table_to_markdown(html_content: str) -> str:

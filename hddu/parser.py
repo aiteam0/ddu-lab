@@ -5,7 +5,11 @@ import time
 import datetime
 import logging
 import pandas as pd
+import base64
+import re
 from pathlib import Path
+from PIL import Image
+from typing import List, Dict, Tuple, Optional
 from .base import BaseNode
 from .state import ParseState
 
@@ -29,15 +33,11 @@ from .assembly import config as assembly_config
 
 
 class DocumentParseNode(BaseNode):
-    def __init__(self, lang="auto", verbose=False, **kwargs):
-        """
-        DocumentParse 클래스의 생성자
+    def __init__(self, lang="auto", verbose=False, **kwargs): #use_ocr=False, 
 
-        :lang: 파싱 언어 설정 (ko, en, cn, auto)
-        """
         super().__init__(verbose=verbose, **kwargs)
         self.lang = lang
-        
+
         try:
             self.assembler = DocumentAssembler()
             self.assembly_enabled = True
@@ -113,6 +113,7 @@ class DocumentParseNode(BaseNode):
             raise ValueError(f"DocYOLO와 Docling 분석 모두 실패")
 
     def _analyze_with_docyolo(self, input_file):
+
         try:
             name_without_suff = os.path.basename(input_file)
             
@@ -160,20 +161,32 @@ class DocumentParseNode(BaseNode):
             with open(os.path.join(local_md_dir, f"{name_without_suff}_middle.json"), "r", encoding="utf-8") as f:
                 middle_json_content = json.load(f)
 
+            name_without_suff = os.path.basename(input_file)
+            content_list_file_path = os.path.join(local_md_dir, f"{name_without_suff}_content_list.json")
+            
             converted_result = convert_content_list(
                 content_list_content, 
                 middle_json_content, 
+                local_image_dir,
+                content_list_file_path
+            )
+            
+            self.log("DocYOLO 결과 이미지 향상 처리 시작...")
+            enhanced_result = self._enhance_docyolo_elements_with_images(
+                converted_result, 
+                input_file, 
                 local_image_dir
             )
             
             self.log(f"DocYOLO 분석 완료: {input_file}")
-            return converted_result
+            return enhanced_result
             
         except Exception as e:
             self.log(f"DocYOLO 분석 중 오류 발생: {str(e)}")
             raise ValueError(f"DocYOLO 분석 실패: {str(e)}")
 
     def _analyze_with_docling(self, input_file):
+
         try:
             name_without_suff = os.path.basename(input_file)
             doc_filename = os.path.splitext(name_without_suff)[0]
@@ -213,19 +226,18 @@ class DocumentParseNode(BaseNode):
             for backend_name, backend_class in backends_to_try:
                 try:
                     self.log(f"Docling 백엔드 시도: {backend_name}")
-                    
-                    # 백엔드별 포맷 옵션 설정
+
                     if backend_name == "PyPdfium2Backend":
                         format_option = PdfFormatOption(
                             pipeline_options=pipeline_options,
                             backend=backend_class
                         )
 
-                    elif backend_name == "DoclingParseV2Backend":
-                        format_option = PdfFormatOption(
-                            pipeline_options=pipeline_options,
-                            backend=backend_class
-                        )
+                    # elif backend_name == "DoclingParseV2Backend":
+                    #     format_option = PdfFormatOption(
+                    #         pipeline_options=pipeline_options,
+                    #         backend=backend_class
+                    #     )
 
                     elif backend_name == "DoclingParseBackend":
                         format_option = PdfFormatOption(
@@ -539,8 +551,22 @@ class DocumentParseNode(BaseNode):
             
             converted_result = convert_docling_result(str(parquet_path), str(output_dir))
             
+            self.log("이미지 향상 처리 시작...")
+            enhanced_result = self._enhance_elements_with_images(
+                converted_result, 
+                page_image_paths, 
+                table_info_by_page, 
+                picture_info_by_page, 
+                str(output_dir),
+                doc_filename
+            )
+            
+            element_count = len(enhanced_result.get("elements", []))
+            enhanced_count = sum(1 for elem in enhanced_result.get("elements", []) if elem.get("base64_encoding"))
+            self.log(f"이미지 향상 완료: 총 {element_count}개 요소 중 {enhanced_count}개 요소에 이미지 추가")
+            
             self.log(f"Docling 분석 완료: {input_file}")
-            return converted_result
+            return enhanced_result
             
         except Exception as e:
             self.log(f"Docling 분석 중 오류 발생: {str(e)}")
@@ -642,6 +668,360 @@ class DocumentParseNode(BaseNode):
         except Exception as e:
             self.log(f"이미지 추출 및 저장 실패: {str(e)}")
             return None
+
+    def _normalize_coordinates_to_pixels(self, coordinates: List[Dict], page_width: int, page_height: int) -> Optional[Tuple[int, int, int, int]]:
+
+        if not coordinates or len(coordinates) < 4:
+            return None
+        
+        try:
+            x_coords = [coord["x"] for coord in coordinates]
+            y_coords = [coord["y"] for coord in coordinates]
+            
+            x_min_norm = min(x_coords)
+            x_max_norm = max(x_coords)
+            y_min_norm = min(y_coords)
+            y_max_norm = max(y_coords)
+            
+            x_min = int(x_min_norm * page_width)
+            x_max = int(x_max_norm * page_width)
+            y_min = int(y_min_norm * page_height)
+            y_max = int(y_max_norm * page_height)
+            
+            x_min = max(0, x_min)
+            y_min = max(0, y_min)
+            x_max = min(page_width, x_max)
+            y_max = min(page_height, y_max)
+            
+            return (x_min, y_min, x_max, y_max)
+            
+        except Exception as e:
+            self.log(f"좌표 변환 실패: {str(e)}")
+            return None
+
+    def _crop_element_image(self, page_image_path: str, bbox: Tuple[float, float, float, float], output_path: str) -> Optional[str]:
+
+        try:
+            with Image.open(page_image_path) as page_img:
+                cropped_img = page_img.crop(bbox)
+                
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                
+                cropped_img.save(output_path, "PNG")
+                
+                self.log(f"이미지 크롭 성공: {output_path} (크기: {cropped_img.size})")
+                return output_path
+                
+        except Exception as e:
+            self.log(f"이미지 크롭 실패: {str(e)}")
+            return None
+
+    def _encode_image_to_base64(self, image_path: str) -> str:
+
+        try:
+            with open(image_path, "rb") as img_file:
+                img_data = img_file.read()
+                base64_str = base64.b64encode(img_data).decode('utf-8')
+                return base64_str
+        except Exception as e:
+            self.log(f"Base64 인코딩 실패: {str(e)}")
+            return ""
+
+    def _get_element_image_filename(self, doc_filename: str, page_no: int, category: str, counter: int) -> str:
+
+        if category == "table":
+            return f"{doc_filename}-page-{page_no}-table-{counter}.png"
+        elif category == "figure":
+            return f"{doc_filename}-page-{page_no}-picture-{counter}.png"
+        else:
+            return f"{doc_filename}-page-{page_no}-text-{counter}.png"
+
+    def _extract_counter_from_path(self, image_path: str, element_type: str) -> int:
+
+        try:
+            if element_type == "table":
+                pattern = r'-table-(\d+)\.png$'
+            elif element_type == "picture":
+                pattern = r'-picture-(\d+)\.png$'
+            else:
+                pattern = r'-text-(\d+)\.png$'
+            
+            match = re.search(pattern, image_path)
+            if match:
+                return int(match.group(1))
+            return 0
+        except Exception:
+            return 0
+
+    def _get_next_counter(self, existing_info: Dict, category: str, page_no: int) -> int:
+
+        max_counter = 0
+        
+        if category == "table" and page_no in existing_info:
+            for table in existing_info[page_no]:
+                paths = table.get('image_paths', [])
+                for path in paths:
+                    counter = self._extract_counter_from_path(path, "table")
+                    max_counter = max(max_counter, counter)
+        
+        elif category == "figure" and page_no in existing_info:
+            for picture in existing_info[page_no]:
+                paths = picture.get('image_paths', [])
+                for path in paths:
+                    counter = self._extract_counter_from_path(path, "picture")
+                    max_counter = max(max_counter, counter)
+        
+        return max_counter + 1 if category != "text" else 1
+
+    def _enhance_elements_with_images(self, converted_result: Dict, page_image_paths: Dict, 
+                                    table_info_by_page: Dict, picture_info_by_page: Dict, 
+                                    output_dir: str, doc_filename: str) -> Dict:
+
+        try:
+            enhanced_elements = []
+            
+            text_counters_by_page = {}
+            
+            for element in converted_result.get("elements", []):
+                enhanced_element = element.copy()
+                
+                category = element.get("category", "")
+                page_no = element.get("page", 1)
+                coordinates = element.get("coordinates", [])
+                
+                page_image_path = page_image_paths.get(page_no - 1)
+                if not page_image_path or not os.path.exists(page_image_path):
+                    self.log(f"페이지 이미지 없음: {page_image_path}")
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                if not coordinates or len(coordinates) < 4:
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                try:
+                    with Image.open(page_image_path) as page_img:
+                        page_width, page_height = page_img.size
+                except Exception as e:
+                    self.log(f"페이지 이미지 로드 실패: {e}")
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                bbox = self._normalize_coordinates_to_pixels(coordinates, page_width, page_height)
+                if not bbox:
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                image_path = None
+                base64_encoding = ""
+                
+                if category == "table":
+                    existing_image = None
+                    if page_no in table_info_by_page:
+                        for table in table_info_by_page[page_no]:
+                            if table.get('image_paths'):
+                                existing_image = table['image_paths'][0]
+                                break
+                    
+                    if existing_image and os.path.exists(os.path.join(output_dir, existing_image)):
+                        image_path = os.path.join(output_dir, existing_image)
+                        self.log(f"기존 테이블 이미지 사용: {existing_image}")
+                    else:
+                        counter = self._get_next_counter(table_info_by_page, "table", page_no)
+                        filename = self._get_element_image_filename(doc_filename, page_no, "table", counter)
+                        image_path = os.path.join(output_dir, filename)
+                        image_path = self._crop_element_image(page_image_path, bbox, image_path)
+                
+                elif category == "figure":
+                    existing_image = None
+                    if page_no in picture_info_by_page:
+                        for picture in picture_info_by_page[page_no]:
+                            if picture.get('image_paths'):
+                                existing_image = picture['image_paths'][0]
+                                break
+                    
+                    if existing_image and os.path.exists(os.path.join(output_dir, existing_image)):
+                        image_path = os.path.join(output_dir, existing_image)
+                        self.log(f"기존 그림 이미지 사용: {existing_image}")
+                    else:
+                        counter = self._get_next_counter(picture_info_by_page, "figure", page_no)
+                        filename = self._get_element_image_filename(doc_filename, page_no, "figure", counter)
+                        image_path = os.path.join(output_dir, filename)
+                        image_path = self._crop_element_image(page_image_path, bbox, image_path)
+                
+                elif category in ["paragraph", "heading1", "heading2", "heading3", "header", "footer", "caption"]:
+                    if page_no not in text_counters_by_page:
+                        text_counters_by_page[page_no] = 0
+                    
+                    text_counters_by_page[page_no] += 1
+                    counter = text_counters_by_page[page_no]
+                    filename = self._get_element_image_filename(doc_filename, page_no, "text", counter)
+                    image_path = os.path.join(output_dir, filename)
+                    image_path = self._crop_element_image(page_image_path, bbox, image_path)
+                
+                if image_path and os.path.exists(image_path):
+                    base64_encoding = self._encode_image_to_base64(image_path)
+                    if base64_encoding:
+                        enhanced_element["base64_encoding"] = base64_encoding
+                        enhanced_element["image_path"] = os.path.basename(image_path)
+                        self.log(f"Base64 인코딩 완료: {category} (크기: {len(base64_encoding)} 문자)")
+                
+                enhanced_elements.append(enhanced_element)
+            
+            enhanced_result = converted_result.copy()
+            enhanced_result["elements"] = enhanced_elements
+            
+            return enhanced_result
+            
+        except Exception as e:
+            self.log(f"이미지 향상 처리 실패: {str(e)}", level=logging.ERROR)
+            return converted_result
+
+    def _generate_page_images_from_pdf(self, pdf_path: str, output_dir: str, doc_filename: str) -> Dict[int, str]:
+
+        try:
+            import fitz
+        except ImportError:
+            self.log("PyMuPDF(fitz)가 설치되지 않았습니다. pip install PyMuPDF", level=logging.ERROR)
+            return {}
+        
+        page_image_paths = {}
+        
+        try:
+            doc = fitz.open(pdf_path)
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = page.get_pixmap(matrix=mat)
+                
+                image_path = os.path.join(output_dir, f"{doc_filename}-page-{page_num + 1}.png")
+                pix.save(image_path)
+                page_image_paths[page_num] = image_path
+                self.log(f"페이지 이미지 생성: {os.path.basename(image_path)}")
+            
+            doc.close()
+            self.log(f"총 {len(page_image_paths)}개 페이지 이미지 생성 완료")
+            return page_image_paths
+            
+        except Exception as e:
+            self.log(f"PDF 페이지 이미지 생성 실패: {str(e)}", level=logging.ERROR)
+            return {}
+
+    def _normalize_coordinates_to_pixels(self, coordinates: List[Dict], page_width: int, page_height: int) -> Optional[Tuple[int, int, int, int]]:
+
+        if not coordinates or len(coordinates) < 4:
+            return None
+        
+        try:
+            x_coords = [coord['x'] * page_width for coord in coordinates]
+            y_coords = [coord['y'] * page_height for coord in coordinates]
+            
+            x_min, x_max = min(x_coords), max(x_coords)
+            y_min, y_max = min(y_coords), max(y_coords)
+            
+            margin = 2
+            x_min = max(0, int(x_min) - margin)
+            y_min = max(0, int(y_min) - margin)
+            x_max = min(page_width, int(x_max) + margin)
+            y_max = min(page_height, int(y_max) + margin)
+            
+            return (x_min, y_min, x_max, y_max)
+            
+        except Exception as e:
+            self.log(f"좌표 변환 실패: {str(e)}")
+            return None
+
+    def _get_element_image_filename_docyolo(self, doc_filename: str, page_no: int, category: str, counter: int) -> str:
+
+        if category == "table":
+            return f"{doc_filename}-page-{page_no}-table-{counter}.png"
+        elif category == "figure":
+            return f"{doc_filename}-page-{page_no}-picture-{counter}.png"
+        else:
+            return f"{doc_filename}-page-{page_no}-text-{counter}.png"
+
+    def _enhance_docyolo_elements_with_images(self, converted_result: Dict, input_file: str, output_dir: str) -> Dict:
+
+        try:
+            doc_filename = os.path.splitext(os.path.basename(input_file))[0]
+            
+            self.log("DocYOLO 결과 이미지 향상 시작: PDF 페이지 이미지 생성")
+            page_image_paths = self._generate_page_images_from_pdf(input_file, output_dir, doc_filename)
+            
+            if not page_image_paths:
+                self.log("페이지 이미지 생성 실패, 이미지 향상 건너뜀")
+                return converted_result
+            
+            counters = {"table": 0, "picture": 0, "text": 0}
+            enhanced_elements = []
+            
+            for element in converted_result.get("elements", []):
+                enhanced_element = element.copy()
+                
+                page_no = element.get("page", 1)
+                category = element.get("category", "paragraph")
+                coordinates = element.get("coordinates", [])
+                
+                page_image_path = page_image_paths.get(page_no - 1)
+                if not page_image_path or not os.path.exists(page_image_path):
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                if not coordinates or len(coordinates) < 4:
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                try:
+                    with Image.open(page_image_path) as page_img:
+                        page_width, page_height = page_img.size
+                except Exception as e:
+                    self.log(f"페이지 이미지 로드 실패: {e}")
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                bbox = self._normalize_coordinates_to_pixels(coordinates, page_width, page_height)
+                if not bbox:
+                    enhanced_elements.append(enhanced_element)
+                    continue
+                
+                if category == "table":
+                    counters["table"] += 1
+                    counter = counters["table"]
+                elif category == "figure":
+                    counters["picture"] += 1
+                    counter = counters["picture"]
+                else:
+                    counters["text"] += 1
+                    counter = counters["text"]
+                
+                image_filename = self._get_element_image_filename_docyolo(doc_filename, page_no, category, counter)
+                image_path = os.path.join(output_dir, image_filename)
+                
+                cropped_image_path = self._crop_element_image(page_image_path, bbox, image_path)
+                
+                if cropped_image_path and os.path.exists(cropped_image_path):
+                    base64_encoding = self._encode_image_to_base64(cropped_image_path)
+                    if base64_encoding:
+                        enhanced_element["base64_encoding"] = base64_encoding
+                        enhanced_element["image_path"] = os.path.basename(cropped_image_path)
+                        self.log(f"DocYOLO 요소 이미지 생성: {category} - {os.path.basename(cropped_image_path)}")
+                
+                enhanced_elements.append(enhanced_element)
+            
+            enhanced_result = converted_result.copy()
+            enhanced_result["elements"] = enhanced_elements
+            
+            total_elements = len(enhanced_elements)
+            enhanced_count = sum(1 for elem in enhanced_elements if elem.get("base64_encoding"))
+            self.log(f"DocYOLO 이미지 향상 완료: 총 {total_elements}개 요소 중 {enhanced_count}개 요소에 이미지 추가")
+            self.log(f"카테고리별 생성 이미지: table={counters['table']}, picture={counters['picture']}, text={counters['text']}")
+            
+            return enhanced_result
+            
+        except Exception as e:
+            self.log(f"DocYOLO 이미지 향상 처리 실패: {str(e)}", level=logging.ERROR)
+            return converted_result
 
     def parse_start_end_page(self, filepath):
         filename = os.path.basename(filepath)

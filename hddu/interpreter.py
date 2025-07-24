@@ -9,6 +9,7 @@ from hddu.config import (
     INTERPRETER_BATCH_REDUCTION_FACTOR
 )
 
+
 import base64
 import os
 import json
@@ -25,17 +26,24 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 import re
+import asyncio
 
 from .logging_config import get_logger
+from .rate_limit_handler import (
+    TokenUsageTracker, 
+    ExponentialBackoffHandler, 
+    RateLimitAwareAPIClient
+)
 
 logger = get_logger(__name__)
 
 
 class ImageContextExtractor:
 
+
     def __init__(
         self,
-        model_type: str = "vision",  #하위 호환성용
+        model_type: str = "vision",  # 하위 호환성용
         model_name: Optional[str] = None,  # 하위 호환성용
         api_key: Optional[str] = None,  # 하위 호환성용
         ollama_base_url: str = "http://localhost:11434",  # 하위 호환성용
@@ -44,10 +52,10 @@ class ImageContextExtractor:
     ):
 
         if model_name is not None or api_key is not None:
-            print("In env file, set VISION_LLM_PROVIDER.")
+            print("⚠️ model_name, api_key 파라미터는 더 이상 사용되지 않습니다. .env 파일에서 VISION_LLM_PROVIDER를 설정하세요.")
         
         self.model_type = model_type
-        self.model_name = model_name or "auto" 
+        self.model_name = model_name or "auto"
         
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -80,7 +88,7 @@ class ImageContextExtractor:
             image_input.save(buffered, format="PNG")
             image_bytes = buffered.getvalue()
         else:
-            raise TypeError("Unsupported image input type")
+            raise TypeError("지원하지 않는 이미지 입력 타입")
 
         return base64.b64encode(image_bytes).decode("utf-8")
 
@@ -97,6 +105,7 @@ class ImageContextExtractor:
             return False
 
     def _create_context_extraction_prompt(self) -> ChatPromptTemplate:
+
         system_message = """You are an expert image analyst. 
 Analyze the given image and extract comprehensive, structured context information 
 using Markdown formatting that can be utilized in a RAG (Retrieval-Augmented Generation) system.
@@ -158,6 +167,7 @@ Use Korean language."""
         ])
 
     def _create_summary_extraction_prompt(self) -> ChatPromptTemplate:
+
         system_message = """You are an expert image summarizer. 
 Analyze the given image and provide a concise and accurate summary using Markdown formatting optimized for RAG search.
 
@@ -313,7 +323,7 @@ Use Korean language."""
             "image_id": image_id or str(hash(str(image_input))),
             "summary": summary,
             "text_content": text_content,
-            "detailed_context": context,
+            "detailed_context": context_result,
             "extraction_model": f"{self.model_type}:{self.model_name}",
             "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -398,61 +408,62 @@ from langchain_core.prompts import PromptTemplate
 from pydantic import Field, BaseModel
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
 
+
 DEFAULT_BATCH_SIZE = INTERPRETER_BATCH_SIZE
 DEFAULT_MAX_TOKENS = INTERPRETER_MAX_TOKENS
 
 PROCESSABLE_CATEGORIES = [
-    "paragraph", "index", "heading1", "heading2", "heading3", 
-    "header", "footer", "caption", "list", "footnote", "table", "figure"
+    "paragraph", "heading1", "heading2", "heading3", 
+    "header", "footer", "caption", "list", "footnote", "table", "figure", "chart", "equation", "reference"
 ]
 
-IMAGE_CATEGORIES = ["table", "figure"]
+IMAGE_CATEGORIES = ["table", "figure", "chart", "equation"]
+
 
 class ContextualizedText(BaseModel):
-    """
-    문맥화된 텍스트를 담는 Pydantic 모델입니다.
-    주어진 텍스트에 추가적인 문맥 정보를 포함시킵니다.
-    """
     contextualized_text: str = Field(
         description="The more contextualized text from the given text"
     )
 
-
 output_parser = PydanticOutputParser(pydantic_object=ContextualizedText)
 
 prompt = PromptTemplate.from_template(
-    """당신은 문서 요소의 맥락을 자연스럽게 풍부하게 만드는 전문가입니다.
-주어진 텍스트에 배경 정보를 활용하여 RAG 시스템에서 더 효과적으로 활용될 수 있도록 문맥화하세요.
+    """당신은 RAG 시스템을 위한 문서 요소 최적화 전문가입니다.
+주어진 텍스트를 배경 정보를 활용하여 검색과 이해가 쉬운 형태로 개선하세요.
 
-**3가지 문맥화 전략:**
+**핵심 원칙 (우선순위 순):**
 
 1. **문서 구조적 맥락**:
-   - 페이지 위치: "페이지 X에서...", "문서 내에서..."
-   - 요소 유형: "이 제목/문단/표/그림에서는..."
-   - 구성 관계: "관련 표와 함께...", "동일 페이지의 다른 요소들과..."
+   - 페이지 위치: (예) 제공된 문맥화 대상 element의 페이지를 참고하여, "페이지 X에서..."
+   - 요소 유형: (예) 제공된 대상 문맥화 대상 element의 카테고리를 참조하여, "이 제목/문단/표/그림에서는..."
+   - 구성 관계: (예) 제공된 문맥화 대상 element의 백그라운드 정보를 참조하여,"OOO을 설명하는 문단/표/그림과 함께..."
 
-2. **주제적 연결 맥락**:
-   - 관련 내용과 연결: "같은 주제를 다루는 다른 요소와 관련하여..."
-   - 카테고리별 연결: "관련 표/그림/설명과 함께..."
-   - 맥락적 보완: "전체 내용의 일부로서..."
+2. **지시대명사 참조 가이드 : 불확실한 지시대명사 사용 지양**:
+   - "이 문단","이 그림", "이 표", "해당 이미지" 등을 구체적 설명으로 반드시 대체
+   - (예) "이 문단" → 텍스트 요약을 활용하여 "OOO을 설명하는 문단"로 사용하여 지시대명사 반드시 대체
+   - (예) "이 그림" → 이미지 요약을 활용하여 "OOO을 설명하는 이미지"로 사용하여 지시대명사 반드시 대체
 
-3. **실용적 컨텍스트**:
-   - 이미지/표 분석 결과 통합: "관련 분석 결과에 따르면..."
-   - 사용자 관점: "이 정보는 사용자가 알아야 할..."
-   - 참조 정보: "문서 내 관련 정보와 함께..."
+3. **검색 효율성 향상**:
+   - 모호한 표현을 구체적이고 검색 가능한 용어로 변환
+   - 핵심 키워드와 개념을 명확히 포함
+   - RAG 시스템에서 관련 정보를 찾기 쉽도록 최적화
 
-**출력 가이드라인**:
+4. **내용 중심 맥락화**:
+   - 관련 내용과의 의미적 연결 강화
+   - 주제적 일관성과 연관성 명시
+   - 실질적 정보 가치 향상
+
+**지양할 요소들**:
+- 불필요한 메타정보: 요소 ID, 추출 시간, 기술적 세부사항
+- 형식적 수사: "이를 통해...", "따라서..." 등의 불필요한 연결어
+
+**출력 요구사항**:
 1. **자연스러운 통합**: 원본 텍스트와 추가 맥락이 하나의 자연스러운 문장/문단이 되도록 작성
-2. **마크다운 형식 유지**: 원본의 마크다운 구조(제목, 목록, 강조 등)를 보존
-3. **과도한 기술적 세부사항 지양**: 요소 ID, 추출 타임스탬프, 모델명 등은 포함하지 않음
-4. **한국어 자연성**: 한국어의 문법과 표현 방식에 맞는 자연스러운 문장 구성
-
-**중요**: 요소들 간의 순서나 위치 관계보다는 내용의 연관성과 주제적 관계에 집중하세요.
-
-**주의사항**:
-- 원본 텍스트의 핵심 의미나 사실 정보를 변경하지 않음
-- 추측이나 없는 정보를 임의로 추가하지 않음
-- 배경 정보에 근거한 맥락만 추가
+2. **과도한 기술적 세부사항 지양**: 요소 ID, 추출 타임스탬프, 모델명 등은 포함하지 않음
+3. **원본 의도 보존**: 핵심 메시지와 사실 정보 유지
+4. **자연스러운 한국어**: 문법적으로 올바르고 읽기 쉬운 문장
+5. **간결성**: 불필요한 확장보다는 명확하고 간결한 표현
+**CRITICAL**: 반드시 배경정보의 지시대명사 참조 가이드를 활용하여 정확히 대체"
 
 **배경 정보**:
 {background_information}
@@ -460,7 +471,7 @@ prompt = PromptTemplate.from_template(
 **문맥화 대상 텍스트**:
 {text}
 
-**문맥화된 결과를 출력하세요**:"""
+**개선된 결과를 출력하세요**:"""
 )
 
 llm = create_text_model(temperature=0).with_structured_output(
@@ -472,6 +483,7 @@ chain = prompt | llm
 openai_extractor = ImageContextExtractor(
     max_tokens=DEFAULT_MAX_TOKENS
 )
+
 
 
 def _process_image_element(element: dict, extractor: ImageContextExtractor) -> str:
@@ -491,18 +503,9 @@ def _process_image_element(element: dict, extractor: ImageContextExtractor) -> s
             f"요약: {image_context['summary']}",
             f"텍스트 내용: {image_context['text_content']}",
             f"상세 컨텍스트: {image_context['detailed_context']}",
-            f"추출 모델: {image_context['extraction_model']}",
-            f"추출 시간: {image_context['extraction_timestamp']}",
             f"키워드: {', '.join(image_context['keywords'])}"
         ]
         
-        # caption 필드 추가
-        # if hasattr(element["content"], "caption"):
-        #     element["content"]["caption"] += "\n\nSummary: " + image_context["summary"]
-        # else:
-        #     element["content"]["caption"] = "Summary: " + image_context["summary"]
-
-        #element에  caption 필드가 있으면 추가, 없으면 생성
         if "caption" in element:
             element["caption"] += "\n\nSummary:\n\n" + image_context["summary"]
         else:
@@ -537,9 +540,9 @@ def _create_background_information(
 ) -> str:
 
     sections = []
-    
+
     sections.append(f"**페이지**: {page}")
-    
+
     category_counts = {}
     for elem in batch:
         category = elem.get("category", "unknown")
@@ -547,23 +550,29 @@ def _create_background_information(
     
     category_summary = ", ".join([f"{cat}({count}개)" for cat, count in category_counts.items()])
     sections.append(f"**페이지 구성**: {category_summary}")
-    
+
     content_by_category = {}
     for elem in batch:
         category = elem.get("category", "unknown")
         content = elem.get("content", {}).get("markdown", "")
-        if content and len(content.strip()) > 0:
+        if content and len(content.strip()) > 0 and category not in IMAGE_CATEGORIES:
             if category not in content_by_category:
                 content_by_category[category] = []
             content_by_category[category].append(content)
     
     for category, contents in content_by_category.items():
         if len(contents) == 1:
-            sections.append(f"**{category} 내용**: {contents[0]}")
+            sections.append(f"**{category} 텍스트 내용**: {contents[0]}")
         else:
             for i, content in enumerate(contents, 1):
-                content_preview = content[:30].replace('\n', ' ')
-                sections.append(f"**{category} #{i} ('{content_preview}')**: {content}")
+                content_clean = content.strip()
+                if content_clean.startswith('#'):
+
+                    preview = content_clean.split('\n')[0].replace('#', '').strip()[:100]
+                else:
+                    preview = content_clean[:40].replace('\n', ' ').strip()
+
+                sections.append(f"**{category} - 텍스트 {preview}**: {content}")
     
     visual_analyses = []
     for elem in batch:
@@ -571,15 +580,15 @@ def _create_background_information(
             try:
                 analysis = _process_image_element(elem, extractor)
                 if analysis:
-                    element_id = elem.get("id", "")
-                    content_preview = elem.get("content", {}).get("markdown", "")[:30]
+                    category_korean_map = {
+                        'table': '표',
+                        'figure': '이미지', 
+                        'chart': '차트',
+                        'equation': '수식'
+                    }
                     
-                    if element_id:
-                        identifier = f"{elem['category']} (ID: {element_id})"
-                    elif content_preview:
-                        identifier = f"{elem['category']} ('{content_preview}')"
-                    else:
-                        identifier = elem['category']
+                    category_korean = category_korean_map.get(elem['category'], elem['category'])
+                    identifier = f"관련 {category_korean}"
                     
                     visual_analyses.append(f"**{identifier}**: {analysis}")
             except Exception as e:
@@ -594,7 +603,7 @@ def _create_background_information(
     total_chars = sum(len(elem.get("content", {}).get("markdown", "")) for elem in batch)
     sections.append(f"**전체 정보**: {total_elements}개 요소, 약 {total_chars}자 분량")
     
-    return "\n\n".join(sections)
+    return "\n\n".join(sections) 
 
 
 def _process_batch(
@@ -625,6 +634,161 @@ def _process_batch(
 
 
 def _process_batch_with_retry(
+    batch: List[dict], 
+    background_information: str, 
+    chain,
+    verbose: bool = True
+) -> List[ContextualizedText]:
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            return _process_batch_sync_fallback(batch, background_information, chain, verbose)
+        else:
+            return loop.run_until_complete(_process_batch_with_retry_async(batch, background_information, chain, verbose))
+    except RuntimeError:
+        return asyncio.run(_process_batch_with_retry_async(batch, background_information, chain, verbose))
+
+async def _process_batch_with_retry_async(
+    batch: List[dict], 
+    background_information: str, 
+    chain,
+    verbose: bool = True
+) -> List[ContextualizedText]:
+
+    if not hasattr(_process_batch_with_retry_async, 'api_client'):
+        token_tracker = TokenUsageTracker(tpm_limit=200000, model="gpt-4o-mini")
+        backoff_handler = ExponentialBackoffHandler(base_delay=1.0, max_delay=300.0, max_retries=7)
+        _process_batch_with_retry_async.api_client = RateLimitAwareAPIClient(token_tracker, backoff_handler)
+    
+    api_client = _process_batch_with_retry_async.api_client
+    
+    if verbose:
+        usage_summary = api_client.get_usage_summary()
+        logger.info(f"Interpreter: 배치 처리 시작 - {usage_summary}")
+        logger.info(f"Interpreter: 배치 크기 {len(batch)}")
+    
+    try:
+        batch_texts = [elem["content"]["markdown"] for elem in batch]
+        total_text = background_information + " ".join(batch_texts)
+        estimated_tokens = api_client.token_tracker.estimate_batch_tokens(
+            batch_texts,
+            prompt_overhead=len(background_information) // 4 + 500
+        )
+        
+        can_proceed, wait_time = api_client.token_tracker.can_make_request(estimated_tokens)
+        if not can_proceed:
+            if verbose:
+                logger.info(f"Interpreter: 토큰 한도 근접으로 {wait_time}초 대기...")
+            await asyncio.sleep(wait_time)
+        
+        async def batch_context_call():
+            return _process_batch(batch, background_information, chain)
+        
+        results = await api_client.safe_api_call(
+            batch_context_call,
+            total_text,
+            request_type="contextualization"
+        )
+        
+        if verbose:
+            logger.info(f"Interpreter: 배치 처리 완료 - {len(results)}개 결과")
+        
+        return results
+        
+    except Exception as e:
+        error_msg = str(e)
+        if verbose:
+            logger.error(f"Interpreter: 배치 처리 실패: {error_msg}")
+        
+        if "rate_limit" in error_msg.lower() or "429" in error_msg:
+            if len(batch) > 1:
+                if verbose:
+                    logger.info(f"Interpreter: Rate Limit로 인한 실패, 배치를 절반으로 분할하여 재시도")
+                
+                mid = len(batch) // 2
+                first_half = batch[:mid]
+                second_half = batch[mid:]
+                
+                first_results = await _process_batch_with_retry_async(first_half, background_information, chain, verbose)
+                second_results = await _process_batch_with_retry_async(second_half, background_information, chain, verbose)
+                
+                return first_results + second_results
+        
+        if verbose:
+            logger.info("Interpreter: 개별 처리로 fallback")
+        return await _process_individual_fallback_async(batch, background_information, chain, verbose)
+
+
+async def _process_individual_fallback_async(
+    batch: List[dict], 
+    background_information: str, 
+    chain,
+    verbose: bool = True
+) -> List[ContextualizedText]:
+
+    results = []
+    
+    if hasattr(_process_batch_with_retry_async, 'api_client'):
+        api_client = _process_batch_with_retry_async.api_client
+    else:
+        token_tracker = TokenUsageTracker(tpm_limit=200000, model="gpt-4o-mini")
+        backoff_handler = ExponentialBackoffHandler(base_delay=1.0, max_delay=300.0, max_retries=5)
+        api_client = RateLimitAwareAPIClient(token_tracker, backoff_handler)
+    
+    for elem in batch:
+        max_individual_retries = 3
+        for retry in range(max_individual_retries):
+            try:
+                element_text = elem["content"]["markdown"]
+                estimated_tokens = len(element_text + background_information) // 4 + 300
+                can_proceed, wait_time = api_client.token_tracker.can_make_request(estimated_tokens)
+                
+                if not can_proceed:
+                    if verbose:
+                        logger.info(f"Interpreter: 개별 처리 토큰 대기 {wait_time:.1f}초")
+                    await asyncio.sleep(wait_time)
+                
+                single_batch_data = [{
+                    "text": element_text,
+                    "background_information": background_information,
+                }]
+                
+                async def single_context_call():
+                    return chain.batch(single_batch_data)
+                
+                single_result = await api_client.safe_api_call(
+                    single_context_call,
+                    element_text + background_information,
+                    request_type="individual_contextualization"
+                )
+                
+                results.append(single_result[0])
+                
+                if verbose:
+                    logger.info(f"  개별 요소 처리 완료")
+                break
+                
+            except Exception as individual_error:
+                error_str = str(individual_error).lower()
+                is_rate_limit = ("rate_limit" in error_str or "429" in error_str or 
+                                "quota" in error_str or "exceeded" in error_str)
+                
+                if retry < max_individual_retries - 1:
+                    wait_time = (5 * (2 ** retry)) if is_rate_limit else (2 * (2 ** retry))
+                    if verbose:
+                        logger.warning(f"Interpreter: 개별 처리 재시도 {retry + 1}/{max_individual_retries}, {wait_time}초 대기")
+                    await asyncio.sleep(wait_time)
+                else:
+                    if verbose:
+                        logger.error(f"  개별 요소 처리 실패: {str(individual_error)}")
+                    results.append(ContextualizedText(
+                        contextualized_text=elem["content"]["markdown"]
+                    ))
+    
+    return results
+
+def _process_batch_sync_fallback(
     batch: List[dict], 
     background_information: str, 
     chain,
@@ -711,7 +875,6 @@ def contextualize_text(
     if verbose:
         logger.info(f"문맥화 처리 시작 - 총 {len(elements_by_page)}개 페이지")
         logger.info(f"설정: batch_size={batch_size}, max_tokens={max_tokens}")
-        #logger.debug(f"elements_by_page: {elements_by_page}")
     
     for page_idx, (page, elements) in enumerate(elements_by_page.items()):
         if verbose:
@@ -733,7 +896,7 @@ def contextualize_text(
                 
                 if verbose:
                     info_size = len(background_information)
-                    estimated_tokens = info_size // 2.5  # 한국어 대략 추정
+                    estimated_tokens = info_size // 2.5
                     logger.debug(f"    배경정보 크기: {info_size}자 (~{estimated_tokens:.0f} 토큰)")
                 
                 contextualized_results = _process_batch_with_retry(

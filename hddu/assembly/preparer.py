@@ -37,7 +37,7 @@ def load_and_group_by_page(docling_path: str, docyolo_path: str) -> GroupedData:
 
 def classify_elements(elements: List[Element]) -> Tuple[List[Element], List[Element], List[Element]]:
     text_like, tables, figures = [], [], []
-    text_categories = {'paragraph', 'heading1', 'heading2', 'heading3', 'list', 'footer', 'header', 'caption'}
+    text_categories = {'paragraph', 'heading1', 'heading2', 'heading3', 'list', 'footer', 'header', 'caption', "footnote", "reference", 'equation'}
     for elem in elements:
         category = elem.get('category', '').lower()
         if category in text_categories: 
@@ -48,6 +48,7 @@ def classify_elements(elements: List[Element]) -> Tuple[List[Element], List[Elem
                 text_like.append(elem_copy)
             else:
                 text_like.append(elem)
+                
         elif category == 'table': 
             elem_copy = elem.copy()
             elem_copy['original_category'] = 'table'
@@ -60,6 +61,7 @@ def classify_elements(elements: List[Element]) -> Tuple[List[Element], List[Elem
                 logger.debug(f"[CAPTION_EXTRACT] Table caption: '{caption_text[:30]}...' (len={len(caption_text)})")
             
             tables.append(elem_copy)
+
         elif category == 'figure': 
             elem_copy = elem.copy()
             elem_copy['original_category'] = 'figure'
@@ -70,6 +72,19 @@ def classify_elements(elements: List[Element]) -> Tuple[List[Element], List[Elem
                 elem_copy['caption'] = caption_text
                 elem_copy['has_caption'] = True
                 logger.debug(f"[CAPTION_EXTRACT] Figure caption: '{caption_text[:30]}...' (len={len(caption_text)})")
+            
+            figures.append(elem_copy)
+
+        elif category == 'chart': 
+            elem_copy = elem.copy()
+            elem_copy['original_category'] = 'chart'
+            elem_copy['processing_type'] = 'chart'
+            
+            caption_text = elem_copy.get('content', {}).get('caption', '')
+            if caption_text:
+                elem_copy['caption'] = caption_text
+                elem_copy['has_caption'] = True
+                logger.debug(f"[CAPTION_EXTRACT] Chart caption: '{caption_text[:30]}...' (len={len(caption_text)})")
             
             figures.append(elem_copy)
         else: 
@@ -88,7 +103,7 @@ def classify_elements(elements: List[Element]) -> Tuple[List[Element], List[Elem
 
 
 def _remove_single_noise_and_reindex(parser_result: Dict, parser_type: str) -> Dict:
-
+    
     if 'elements' not in parser_result:
         return parser_result
     
@@ -112,7 +127,7 @@ def _remove_single_noise_and_reindex(parser_result: Dict, parser_type: str) -> D
     return result
 
 def _is_single_noise(element: Dict) -> bool:
-
+    
     category = element.get('category', '').lower()
     element_id = element.get('id', 'unknown')
     
@@ -131,14 +146,17 @@ def _is_single_noise(element: Dict) -> bool:
     
     stripped_text = text.strip()
     
-    if not text:
-        logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: empty text")
-        return True
+    # 1. 빈 텍스트 (아무것도 없는 것)
+    # if not text:
+    #     logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: empty text")
+    #     return True
     
-    if not stripped_text:
-        logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: whitespace only")
-        return True
+    # 2. 공백만 있는 것
+    # if not stripped_text:
+    #     logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: whitespace only")
+    #     return True
     
+    # 3. 단일 특수문자 (".", "_")
     if len(stripped_text) == 1 and stripped_text in '._':
         logger.debug(f"[NOISE_CHECK] Element {element_id} ({category}) - Marked as noise: single special char '{stripped_text}'")
         return True

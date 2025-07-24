@@ -1,34 +1,23 @@
-from hddu.config import (
-    create_text_model,
-    PREPROCESSING_TEMPERATURE,
-    PREPROCESSING_MAX_TOKENS,
-    PREPROCESSING_BATCH_SIZE,
-    PREPROCESSING_MAX_RETRIES,
-    PREPROCESSING_RETRY_DELAY,
-    PREPROCESSING_BATCH_REDUCTION_FACTOR
-)
-
 from hddu.state import ParseState
 from .element import Element
 from .logging_config import get_logger, setup_verbose_logging
 
-# 모듈 로거 생성
+
 logger = get_logger(__name__)
 import base64
 import os
 import re
 import json
 import pickle
+import re
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict
 from .base import BaseNode
 from langchain_core.documents import Document
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
 
 IMAGE_TYPES = ["figure", "chart"]
-TEXT_TYPES = ["text", "equation", "caption", "paragraph", "list", "index", "heading1", "heading2", "heading3"]
+TEXT_TYPES = ["equation", "caption", "paragraph", "list", "heading1", "heading2", "heading3", "footnote", "header", "footer", "reference"]
 TABLE_TYPES = ["table"]
 
 
@@ -62,7 +51,7 @@ def parse_llm_entity_output(llm_output: str, entity_type: str) -> Dict:
         }
     
     except Exception as e:
-        logger.error(f"Entity parsing error: {e}")
+        logger.error(f"Entity 파싱 오류: {e}")
         return _create_empty_entity(entity_type, llm_output)
 
 
@@ -102,11 +91,11 @@ class SaveImageNode(BaseNode):
     def execute(self, state: ParseState) -> ParseState:
         if self.verbose:
             setup_verbose_logging(self.verbose)
-            logger.info("SaveImageNode: image saving started")
+            logger.info("SaveImageNode: 이미지 저장 시작")
         
         directory = os.path.dirname(state["filepath"])
         base_filename = os.path.splitext(os.path.basename(state["filepath"]))[0]
-        image_paths = {}
+        image_paths = {}  # element_id -> image_path 매핑
         
         saved_count = 0
         for element in state["elements_from_parser"]:
@@ -114,7 +103,9 @@ class SaveImageNode(BaseNode):
             category = element["category"]
             base64_encoding = element.get("base64_encoding")
             
-            if base64_encoding and category in ["table", "figure", "chart"]:
+            # 이미지 저장 (base64_encoding이 있는 경우만) -> 텍스트 타입 요소들도 이미지 파일로 저장되고, 전체 파이프라인에서 이미지 경로 정보가 보존
+            #if base64_encoding and category in ["table", "figure", "chart"]:
+            if base64_encoding:
                 try:
                     image_filepath = self._save_base64_image(
                         base64_encoding,
@@ -128,14 +119,14 @@ class SaveImageNode(BaseNode):
                     saved_count += 1
                     
                     if self.verbose:
-                        logger.info(f"Image saved successfully: {category} ID {element_id} -> {image_filepath}")
+                        logger.info(f"  이미지 저장 성공: {category} ID {element_id} -> {image_filepath}")
                         
                 except Exception as e:
                     if self.verbose:
-                        logger.error(f"Image saving failed: ID {element_id}, Error: {e}")
+                        logger.error(f"  이미지 저장 실패: ID {element_id}, Error: {e}")
         
         if self.verbose:
-            logger.info(f"SaveImageNode: total {saved_count} images saved")
+            logger.info(f"SaveImageNode: 총 {saved_count}개 이미지 저장 완료")
         
         return {"image_paths": image_paths}
 
@@ -143,216 +134,63 @@ class SaveImageNode(BaseNode):
 class RefineContentNode(BaseNode):
     def __init__(self, verbose=False, **kwargs):
         super().__init__(verbose=verbose, **kwargs)
-        self.llm = create_text_model(
-            temperature=PREPROCESSING_TEMPERATURE,
-            max_tokens=PREPROCESSING_MAX_TOKENS
-        )
-        self.output_parser = StrOutputParser()
         
-        self.refine_prompt = PromptTemplate.from_template("""
-You are a text refinement assistant. Your task is to improve and refine the given text content by:
-
-1. Replacing any temporary image paths or placeholders with actual saved image paths
-2. Improving readability and coherence
-3. Maintaining the original meaning and structure
-4. Ensuring proper markdown formatting
-5. Transform Arabic text to Korean text considering the context of the text
-
-**Available Image Information:**
-{image_info}
-
-**Original Text:**
-{original_text}
-
-**Instructions:**
-- If you find references to images in the text, replace them with appropriate markdown image links using the saved image paths
-- Improve the text quality while preserving the original meaning
-- Return only the refined text, do not add explanations
-- Keep the same language as the original text
-
-**Refined Text:**
-""")
-
-    def _get_image_info_for_element(self, element_id: str, image_paths: Dict) -> str:
-        if element_id in image_paths:
-            return f"Element {element_id}: {image_paths[element_id]}"
-        return "No image available for this element"
-
-    def _should_refine_element(self, element: dict) -> bool:
-        content = element["content"]
+        self.image_link_pattern = re.compile(r'!\[.*?\]\(.*?\)')
+        self.whitespace_pattern = re.compile(r'\s+')
+        self.newline_pattern = re.compile(r'\n\s*\n\s*\n+')
         
-        for field_name in ["text", "markdown", "html"]:
-            if field_name in content and content[field_name] and len(content[field_name]) > 20:
-                return True
-        return False
+        self.process_fields = [
+            "text", "markdown", "html", 
+            "translation_text", "translation_markdown", "translation_html", 
+            "contextualize_text"
+        ]
 
-    def _prepare_batch_data(self, elements: List[dict], image_paths: Dict) -> List[dict]:
-        batch_data = []
-        
-        for element in elements:
-            element_id = element["id"]
-            content = element["content"]
-            image_info = self._get_image_info_for_element(element_id, image_paths)
+    def _clean_text(self, text: str) -> str:
+        if not text or len(text) <= 20:
+            return text
             
-            for field_name in ["text", "markdown", "html"]:
-                if field_name in content and content[field_name] and len(content[field_name]) > 20:
-                    batch_data.append({
-                        "element_id": element_id,
-                        "field_name": field_name,
-                        "original_text": content[field_name],
-                        "image_info": image_info
-                    })
+        cleaned = self.image_link_pattern.sub('', text)
         
-        return batch_data
-
-    def _refine_batch_with_retry(self, batch_data: List[dict], max_retries: int = None) -> Dict[str, Dict[str, str]]:
-        if max_retries is None:
-            max_retries = PREPROCESSING_MAX_RETRIES
+        cleaned = self.whitespace_pattern.sub(' ', cleaned)
         
-        if not batch_data:
-            return {}
+        cleaned = self.newline_pattern.sub('\n\n', cleaned)
         
-        results = {}
-        
-        for attempt in range(max_retries):
-            try:
-                if self.verbose:
-                    logger.info(f"  배치 처리 시도 {attempt + 1}/{max_retries}, 배치 크기: {len(batch_data)}")
-                
-                prompt_data = [
-                    {
-                        "original_text": item["original_text"],
-                        "image_info": item["image_info"]
-                    }
-                    for item in batch_data
-                ]
-                
-                chain = self.refine_prompt | self.llm | self.output_parser
-                refined_texts = chain.batch(prompt_data)
-                
-                for batch_item, refined_text in zip(batch_data, refined_texts):
-                    element_id = batch_item["element_id"]
-                    field_name = batch_item["field_name"]
-                    
-                    if element_id not in results:
-                        results[element_id] = {}
-                    results[element_id][field_name] = refined_text.strip()
-                
-                if self.verbose:
-                    logger.info(f"Batch processing successful: {len(batch_data)} texts refined")
-                
-                return results
-                
-            except Exception as e:
-                if self.verbose:
-                    logger.error(f"  Batch processing failed (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                if attempt < max_retries - 1:
-                    import time
-                    wait_time = PREPROCESSING_RETRY_DELAY * (2 ** attempt)
-                    if self.verbose:
-                        logger.info(f"  {wait_time:.1f}초 대기 후 재시도...")
-                    time.sleep(wait_time)
-                    
-                    if len(batch_data) > 1:
-                        new_size = max(1, int(len(batch_data) * PREPROCESSING_BATCH_REDUCTION_FACTOR))
-                        batch_data = batch_data[:new_size]
-                        if self.verbose:
-                            logger.info(f"Batch size reduced to {new_size}")
-                else:
-                    if self.verbose:
-                        logger.warning(f"Batch processing final failure, fallback to individual processing")
-                    return self._fallback_individual_processing(batch_data)
-        
-        return {}
-
-    def _fallback_individual_processing(self, batch_data: List[dict]) -> Dict[str, Dict[str, str]]:
-        results = {}
-        
-        for item in batch_data:
-            try:
-                chain = self.refine_prompt | self.llm | self.output_parser
-                refined_text = chain.invoke({
-                    "original_text": item["original_text"],
-                    "image_info": item["image_info"]
-                })
-                
-                element_id = item["element_id"]
-                field_name = item["field_name"]
-                
-                if element_id not in results:
-                    results[element_id] = {}
-                results[element_id][field_name] = refined_text.strip()
-                
-                if self.verbose:
-                    logger.info(f"Individual processing successful: Element {element_id} - {field_name}")
-                    
-            except Exception as e:
-                if self.verbose:
-                    logger.error(f"Individual processing failed: Element {item['element_id']} - {item['field_name']}: {e}")
-        
-        return results
-
-    def _apply_refined_results(self, elements: List[dict], results: Dict[str, Dict[str, str]]) -> int:
-        applied_count = 0
-        
-        for element in elements:
-            element_id = element["id"]
-            if element_id in results:
-                content = element["content"]
-                for field_name, refined_text in results[element_id].items():
-                    if field_name in content:
-                        content[field_name] = refined_text
-                        applied_count += 1
-        
-        return applied_count
+        return cleaned.strip()
+    
+    def _should_process_field(self, text: str) -> bool:
+        return text and len(text) > 20 and self.image_link_pattern.search(text) is not None
 
     def execute(self, state: ParseState) -> ParseState:
         if self.verbose:
             setup_verbose_logging(self.verbose)
-            logger.info("RefineContentNode: batch text refinement started")
+            logger.info("RefineContentNode: 정규식 기반 텍스트 정제 시작")
         
-        image_paths = state.get("image_paths", {})
         elements = state["elements_from_parser"]
         
-        refinable_elements = [elem for elem in elements if self._should_refine_element(elem)]
+        total_cleaned = 0
+        total_fields_processed = 0
         
-        if not refinable_elements:
-            if self.verbose:
-                logger.info("RefineContentNode: no elements to refine")
-            return {"elements_from_parser": elements}
-        
-        if self.verbose:
-            logger.info(f"RefineContentNode: {len(refinable_elements)} elements to refine")
-        
-        batch_size = PREPROCESSING_BATCH_SIZE
-        total_refined = 0
-        
-        for i in range(0, len(refinable_elements), batch_size):
-            batch_elements = refinable_elements[i:i+batch_size]
-            batch_num = (i // batch_size) + 1
-            total_batches = (len(refinable_elements) + batch_size - 1) // batch_size
+        for element in elements:
+            content = element["content"]
             
-            if self.verbose:
-                logger.info(f"RefineContentNode: batch {batch_num}/{total_batches} processing ({len(batch_elements)} elements)")
-            
-            batch_data = self._prepare_batch_data(batch_elements, image_paths)
-            
-            if not batch_data:
-                if self.verbose:
-                    logger.info(f"Batch {batch_num}: no text to process")
-                continue
-            
-            batch_results = self._refine_batch_with_retry(batch_data)
-            
-            applied_count = self._apply_refined_results(batch_elements, batch_results)
-            total_refined += applied_count
-            
-            if self.verbose:
-                logger.info(f"Batch {batch_num} completed: {applied_count} texts refined")
+            for field_name in self.process_fields:
+                if field_name in content and content[field_name]:
+                    original_text = content[field_name]
+                    
+                    if self._should_process_field(original_text):
+                        cleaned_text = self._clean_text(original_text)
+                        
+                        if cleaned_text != original_text:
+                            content[field_name] = cleaned_text
+                            total_cleaned += 1
+                            
+                            if self.verbose:
+                                logger.debug(f"  정제 완료: Element {element['id']} - {field_name}")
+                    
+                    total_fields_processed += 1
         
         if self.verbose:
-            logger.info(f"RefineContentNode: total {total_refined} texts refined")
+            logger.info(f"RefineContentNode: {total_fields_processed}개 필드 중 {total_cleaned}개 필드 정제 완료")
         
         return {"elements_from_parser": elements}
 
@@ -387,7 +225,8 @@ class CreateElementsNode(BaseNode):
             translation_html = content.get("translation_html", "")
             contextualize_text = content.get("contextualize_text", "")
 
-            if category in ["footnote", "header", "footer"]:
+             #"header", 
+            if category in ["footnote", "footer"]:
                 continue
 
             image_filename = image_paths.get(element["id"])
@@ -511,7 +350,7 @@ class ReconstructElementsNode(BaseNode):
                 "translation_html": getattr(elem, 'translation_html', ''),
                 "contextualize_text": getattr(elem, 'contextualize_text', ''),
                 "caption": getattr(elem, 'caption', ''),
-                "entity": getattr(elem, 'entity', {}),
+                "entity": getattr(elem, 'entity', {}),  # 구조화된 딕셔너리
                 "image_path": getattr(elem, 'image_filename', ''),
                 "coordinates": getattr(elem, 'coordinates', []),
                 "processing_type": getattr(elem, 'processing_type', ''),
@@ -539,6 +378,8 @@ class ReconstructElementsNode(BaseNode):
                 }
                 page_data["image"].append(image_elem)
             elif elem.category in TEXT_TYPES:
+                #page_data["text"] += elem.content
+                # 원문 마크다운 추가
                 page_data["text"] += elem.markdown
 
         return {"reconstructed_elements": reconstructed_elements}
@@ -663,9 +504,9 @@ class LangChainDocumentNode(BaseNode):
         try:
             with open(pickle_filepath, "wb") as f:
                 pickle.dump(documents, f)
-            self.log(f"LangChain Documents saved to pickle file: {pickle_filepath}")
+            self.log(f"LangChain Documents가 pickle 파일로 저장되었습니다: {pickle_filepath}")
         except Exception as e:
-            self.log(f"Error saving pickle file: {e}")
+            self.log(f"pickle 저장 중 오류 발생: {e}")
 
         return {"documents": documents, "documents_pickle_path": pickle_filepath}
 
@@ -711,20 +552,20 @@ class SaveFinalStateNode(BaseNode):
                     serializable_state[key] = value
                 except (TypeError, ValueError):
                     serializable_state[key] = str(value)
-
+        
         serializable_state["final_processing_completed_at"] = datetime.now().isoformat()
         
         try:
             with open(state_json_path, "w", encoding="utf-8") as f:
                 json.dump(serializable_state, f, ensure_ascii=False, indent=2)
-            self.log(f"Final state saved to JSON file: {state_json_path}")
+            self.log(f"최종 state가 JSON 파일로 저장되었습니다: {state_json_path}")
             
             with open(state_pickle_path, "wb") as f:
                 pickle.dump(state, f)
-            self.log(f"Final state saved to pickle file: {state_pickle_path}")
+            self.log(f"최종 state가 pickle 파일로 저장되었습니다: {state_pickle_path}")
             
         except Exception as e:
-            self.log(f"Error saving final state: {e}")
+            self.log(f"최종 state 저장 중 오류 발생: {e}")
         
         return {
             "final_state_json_path": state_json_path,
