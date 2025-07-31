@@ -37,8 +37,6 @@ class PageElementsExtractorNode(BaseNode):
             max_page = max(max_page, page_num)
             if page_num not in elements_by_page:
                 elements_by_page[page_num] = []
-            if elem.category in (IMAGE_TYPES + TABLE_TYPES):
-                elements_by_page[page_num] = []
             elements_by_page[page_num].append(elem)
 
         texts_by_page = dict()
