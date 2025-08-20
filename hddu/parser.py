@@ -19,7 +19,7 @@ from magic_pdf.model.doc_analyze_by_custom_model import doc_analyze
 from magic_pdf.config.enums import SupportedPdfParseMethod
 
 from docling.datamodel.base_models import InputFormat, DocItemLabel, OcrCell
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.utils.export import generate_multimodal_pages
 from docling.utils.utils import create_hash
@@ -204,8 +204,17 @@ class DocumentParseNode(BaseNode):
             pipeline_options.do_ocr = True
             pipeline_options.do_table_structure = True
             pipeline_options.table_structure_options.do_cell_matching = True
-            pipeline_options.ocr_options.lang = ["ko", "en"]
-            pipeline_options.ocr_options.use_gpu = False
+            # EasyOCR
+            # pipeline_options.ocr_options.lang = ["ko", "en"]
+            # pipeline_options.ocr_options.use_gpu = False
+            
+            # RapidOCR 설정으로 변경 (기존 EasyOCR 대신)
+            pipeline_options.ocr_options = RapidOcrOptions(
+                kind="rapidocr",
+                lang=["korean", "english"],  # PP-OCRv5 한국어 지원
+                text_score=0.5,  # 텍스트 신뢰도 임계값
+                print_verbose=False  # 디버그 메시지 비활성화
+            )
             
             self.log(f"Docling 분석 시작: {input_file}")
             self.log(f"파이프라인 옵션: 이미지 스케일={pipeline_options.images_scale}, OCR 언어={pipeline_options.ocr_options.lang}")
