@@ -44,6 +44,8 @@ from hddu.extractor import (
     TableEntityExtractorNode,
 )
 
+from hddu.config import LANGGRAPH_RECURSION_LIMIT
+from langgraph.errors import GraphRecursionError
 
 def create_complete_workflow(batch_size=1, test_page=None, verbose=True):
 
@@ -499,8 +501,16 @@ def run_workflow_from_assembled(assembled_path, verbose=True):
     try:
         execution_start = time.time()
         logger.info("워크플로우 실행 시작...")
-        
-        config = {"configurable": {"thread_id": "assembled_workflow_thread"}}
+
+        logger.info("워크플로우 구성 정보:")
+        logger.info(f"  - 노드 수: {len(workflow.nodes) if hasattr(workflow, 'nodes') else 'N/A'}")
+        logger.info(f"  - 재귀 제한: {LANGGRAPH_RECURSION_LIMIT}")
+        logger.info(f"  - 환경: Assembled 기반 워크플로우")
+
+        config = {
+            "configurable": {"thread_id": "assembled_workflow_thread"},
+            "recursion_limit": LANGGRAPH_RECURSION_LIMIT
+        }
         final_state = workflow.invoke(initial_state, config=config)
         
         execution_time = time.time() - execution_start
@@ -569,6 +579,13 @@ def run_workflow_from_assembled(assembled_path, verbose=True):
             logger.info("=" * 60)
         
         return final_state
+    
+    except GraphRecursionError as e:
+        total_time = time.time() - start_time
+        logger.error(f"GraphRecursionError: 재귀 제한 초과 (실행 시간: {total_time:.2f}초)")
+        logger.error(f"현재 재귀 제한: {LANGGRAPH_RECURSION_LIMIT}")
+        logger.error(f"상세 에러: {e}")
+        raise
         
     except Exception as e:
         total_time = time.time() - start_time
@@ -633,8 +650,19 @@ def run_complete_workflow(pdf_filepath, batch_size=1, test_page=None, verbose=Tr
     try:
         execution_start = time.time()
         logger.info("워크플로우 실행 시작...")
+
+        logger.info("워크플로우 구성 정보:")
+        logger.info(f"  - 노드 수: {len(workflow.nodes) if hasattr(workflow, 'nodes') else 'N/A'}")
+        logger.info(f"  - 재귀 제한: {LANGGRAPH_RECURSION_LIMIT}")
+        logger.info(f"  - 환경: Complete 워크플로우")
+        logger.info(f"  - 배치 크기: {batch_size}")
+        if test_page:
+            logger.info(f"  - 테스트 페이지: {test_page}")
         
-        config = {"configurable": {"thread_id": "test_workflow_thread"}}
+        config = {
+            "configurable": {"thread_id": "test_workflow_thread"},
+            "recursion_limit": LANGGRAPH_RECURSION_LIMIT
+            }
         final_state = workflow.invoke(initial_state, config=config)
         
         execution_time = time.time() - execution_start
@@ -703,6 +731,13 @@ def run_complete_workflow(pdf_filepath, batch_size=1, test_page=None, verbose=Tr
             logger.info("=" * 60)
         
         return final_state
+    
+    except GraphRecursionError as e:
+        total_time = time.time() - start_time
+        logger.error(f"GraphRecursionError: 재귀 제한 초과 (실행 시간: {total_time:.2f}초)")
+        logger.error(f"현재 재귀 제한: {LANGGRAPH_RECURSION_LIMIT}")
+        logger.error(f"상세 에러: {e}")
+        raise
         
     except Exception as e:
         total_time = time.time() - start_time

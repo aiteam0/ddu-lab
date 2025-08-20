@@ -78,6 +78,8 @@ SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.75"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
 LLM_BASED_ID_ASSIGNMENT = os.getenv("LLM_BASED_ID_ASSIGNMENT", "disabled").lower()
 
+LANGGRAPH_RECURSION_LIMIT = int(os.getenv("LANGGRAPH_RECURSION_LIMIT", "150"))
+
 
 def get_model_config(model_type: ModelType) -> Dict[str, Any]:
     if model_type == "text":
